@@ -2,5 +2,5 @@
  "name":"pml-juegos","main":"worker.mjs","compatibility_date":"2026-10-01",
  "workers_dev":true,
  "vars":{"FIREBASE_PROJECT_ID":"pro-mobile-league","OWNER_UID":"iCLoGhjbXNgY3Q7dbxX0456vagI2"},
- "d1_databases":[{"binding":"DB","database_name":"pml-juegos","database_id":"REEMPLAZAR_CON_ID_D1"}]
+ "d1_databases":[{"binding":"DB","database_name":"pml-juegos","database_id":"e4f5a4f3-ab15-424e-93fa-014e9b9e0c3c"}]
 }
