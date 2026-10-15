@@ -1,0 +1,31 @@
+name: Preparar publicación PML Torneos
+on:
+  push:
+    branches: [main]
+    paths:
+      - release/pml-torneos.json
+      - .github/workflows/pml-release-draft.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const file = await github.rest.repos.getContent({owner, repo, path:'release/pml-torneos.json', ref:context.sha});
+            const channel = JSON.parse(Buffer.from(file.data.content, 'base64').toString('utf8'));
+            if (channel.channel !== 'PML-TORNEOS' || channel.package !== 'com.promobileleague.torneos' || !/^\d+\.\d+\.\d+$/.test(channel.version)) throw new Error('Canal inválido');
+            const tag_name = 'v' + channel.version;
+            const name = 'PML Torneos ' + channel.version;
+            const body = `Canal: PML-TORNEOS\nPaquete: ${channel.package}\nVersión: ${channel.version}\nCódigo: ${channel.versionCode}\nSHA-256 APK: ${channel.sha256}\n\nInstalar sobre PML Torneos. Conserva los datos y la firma. La app antigua es un paquete diferente.\n\nDespués de adjuntar Pro-Mobile-League.apk, publicar como versión estable y marcar Set as latest release.`;
+            let release;
+            try { release = (await github.rest.repos.getReleaseByTag({owner, repo, tag:tag_name})).data; }
+            catch (error) { if (error.status !== 404) throw error; }
+            if (release && !release.draft) { core.notice('La versión ya está publicada; no se modifica.'); return; }
+            if (release) await github.rest.repos.updateRelease({owner, repo, release_id:release.id, name, body});
+            else release = (await github.rest.repos.createRelease({owner, repo, tag_name, target_commitish:context.sha, name, body, draft:true, prerelease:false})).data;
+            core.notice('Borrador preparado: ' + release.html_url);
