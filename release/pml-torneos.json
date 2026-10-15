@@ -1,9 +1,9 @@
 {
   "channel": "PML-TORNEOS",
   "package": "com.promobileleague.torneos",
-  "version": "1.8.1",
-  "versionCode": 23,
+  "version": "1.8.2",
+  "versionCode": 24,
   "asset": "Pro-Mobile-League.apk",
-  "sha256": "219c5b9260ea4874c3df6e158fb4811b914229f58a16295943c34987fd89a242",
+  "sha256": "7d5fafc85327c1ec55b3a76ac83246afcf629d08a3cbd4293fede3a99cf576e0",
   "signerSha256": "0a5d0501de7179af19d93eb7a7642fa4356b5022e3a4125e262dc78eebe7ddf9"
 }
