@@ -1,0 +1,1 @@
+{"name":"pml-games-server","private":true,"type":"module","scripts":{"dev":"wrangler dev","deploy":"wrangler deploy","test":"node --test test/*.test.mjs"},"dependencies":{"jose":"6.1.3"},"devDependencies":{"wrangler":"4.43.0"}}
