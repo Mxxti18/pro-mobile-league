@@ -1,7 +1,145 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// node_modules/jose/dist/webapi/lib/buffer_utils.js
+// engine.mjs
+var GameError = class extends Error {
+  static {
+    __name(this, "GameError");
+  }
+  constructor(message2, status = 400) {
+    super(message2);
+    this.status = status;
+  }
+};
+function dateAR(now = Date.now()) {
+  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short" }).formatToParts(new Date(now));
+  const x = Object.fromEntries(f.map((p) => [p.type, p.value]));
+  return { day: `${x.year}-${x.month}-${x.day}`, weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(x.weekday) };
+}
+__name(dateAR, "dateAR");
+function available(kind, now = Date.now()) {
+  const d = dateAR(now).weekday;
+  return kind === "mines" ? [1, 2].includes(d) : kind === "penalties" ? [3, 4].includes(d) : false;
+}
+__name(available, "available");
+function randomInt(n) {
+  const range = 4294967296, limit = range - range % n;
+  let x;
+  do {
+    x = crypto.getRandomValues(new Uint32Array(1))[0];
+  } while (x >= limit);
+  return x % n;
+}
+__name(randomInt, "randomInt");
+function createGame(kind, rng = randomInt) {
+  if (kind === "mines") {
+    const board = [...Array(15).fill(1), ...Array(10).fill(2), ...Array(5).fill(5), "x2", "x4", "x6", "mine", "mine", "mine"];
+    for (let i = board.length - 1; i > 0; i--) {
+      const j = rng(i + 1);
+      [board[i], board[j]] = [board[j], board[i]];
+    }
+    return { secret: board, state: { revealed: [], total: 0, mines: 0 }, status: "active", payout: 0 };
+  }
+  if (kind === "penalties") return { secret: Array.from({ length: 5 }, () => rng(3)), state: { shots: [], goals: 0 }, status: "active", payout: 0 };
+  throw new GameError("Juego inexistente.");
+}
+__name(createGame, "createGame");
+function playGame(g, action) {
+  if (g.status !== "active") throw new GameError("La partida ya termin\xF3.", 409);
+  const next = structuredClone(g), s = next.state;
+  if (g.kind === "mines") {
+    if (action.type === "cashout") {
+      next.status = "won";
+      next.payout = s.total;
+      return next;
+    }
+    const i = action.cell;
+    if (action.type !== "reveal" || !Number.isInteger(i) || i < 0 || i >= 36) throw new GameError("Eleg\xED una casilla v\xE1lida.");
+    if (s.revealed.includes(i)) throw new GameError("Esa casilla ya est\xE1 descubierta.", 409);
+    s.revealed.push(i);
+    const cell = g.secret[i];
+    if (cell === "mine") {
+      s.mines++;
+      if (s.mines === 3) {
+        s.total = 0;
+        next.status = "lost";
+      }
+    } else if (typeof cell === "string") s.total *= Number(cell.slice(1));
+    else s.total += cell;
+    if (next.status === "active" && s.revealed.length === 36) {
+      next.status = "won";
+      next.payout = s.total;
+    }
+  } else {
+    if (action.type !== "shoot" || !Number.isInteger(action.direction) || action.direction < 0 || action.direction > 2) throw new GameError("Eleg\xED izquierda, centro o derecha.");
+    const keeper = g.secret[s.shots.length], goal = action.direction !== keeper;
+    s.shots.push({ direction: action.direction, keeper, goal });
+    if (goal) s.goals++;
+    if (s.shots.length === 5) {
+      next.payout = [0, 0, 10, 25, 50, 100][s.goals];
+      next.status = next.payout ? "won" : "lost";
+    }
+  }
+  return next;
+}
+__name(playGame, "playGame");
+function publicGame(row) {
+  if (!row) return null;
+  const secret = typeof row.secret === "string" ? JSON.parse(row.secret) : row.secret;
+  const state = typeof row.state === "string" ? JSON.parse(row.state) : row.state;
+  const out = { id: row.id, kind: row.kind, day: row.day, status: row.status, version: row.version, state, payout: row.payout };
+  if (row.kind === "mines") out.cells = secret.map((v, i) => state.revealed.includes(i) || row.status !== "active" ? v : null);
+  return out;
+}
+__name(publicGame, "publicGame");
+
+// practice.mjs
+var PRACTICE_OWNER = "iCLoGhjbXNgY3Q7dbxX0456vagI2";
+async function practice(path, body, user, q, now) {
+  if (user.sub !== PRACTICE_OWNER) throw new GameError("Este modo est\xE1 reservado para el creador.", 403);
+  const uid = user.sub, initial = { wallet: { name: "PRUEBA", balance: 500 }, games: [], movements: [] };
+  await q("INSERT OR IGNORE INTO practice_sessions(uid,state,updated_at) VALUES(?,?,?)", uid, JSON.stringify(initial), now).run();
+  const row = await q("SELECT * FROM practice_sessions WHERE uid=?", uid).first();
+  let data = JSON.parse(row.state), changed = false;
+  if (path === "/practice/reset") {
+    data = initial;
+    changed = true;
+  } else if (path === "/practice/me") {
+  } else if (path === "/practice/games/start") {
+    if (!["mines", "penalties"].includes(body.kind)) throw new GameError("Juego inv\xE1lido.");
+    let g = data.games.find((x) => x.kind === body.kind);
+    if (!g || g.status !== "active") {
+      if (data.wallet.balance < 25) throw new GameError("Reinici\xE1 la prueba para recuperar fichas de prueba.", 409);
+      g = { ...createGame(body.kind), id: crypto.randomUUID(), kind: body.kind, day: dateAR(now).day, version: 0 };
+      data.games = data.games.filter((x) => x.kind !== body.kind);
+      data.games.push(g);
+      data.wallet.balance -= 25;
+      data.movements.unshift({ amount: -25, reason: "TICKET DE PRUEBA", at: now });
+      changed = true;
+    }
+  } else if (path === "/practice/games/action") {
+    const g = data.games.find((x) => x.id === body.id);
+    if (!g) throw new GameError("Partida de prueba inexistente.", 404);
+    if (g.version !== body.version) throw new GameError("La prueba cambi\xF3. Actualiz\xE1 para continuar.", 409);
+    const next = playGame(g, body.action || {});
+    next.version = g.version + 1;
+    data.games = data.games.map((x) => x.id === g.id ? next : x);
+    if (next.status === "won" && next.payout) {
+      data.wallet.balance += next.payout;
+      data.movements.unshift({ amount: next.payout, reason: "PREMIO DE PRUEBA", at: now });
+    }
+    changed = true;
+  } else throw new GameError("Ruta de prueba inexistente.", 404);
+  data.movements = data.movements.slice(0, 30);
+  if (changed) {
+    const updated = await q("UPDATE practice_sessions SET state=?,version=version+1,updated_at=? WHERE uid=? AND version=? RETURNING uid", JSON.stringify(data), now, uid, row.version).first();
+    if (!updated) throw new GameError("Otra acci\xF3n actualiz\xF3 la prueba. Volv\xE9 a cargarla.", 409);
+  }
+  return { ...data, games: data.games.map(publicGame), day: dateAR(now).day, available: { mines: true, penalties: true }, practice: true };
+}
+__name(practice, "practice");
+
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/buffer_utils.js
 var encoder = new TextEncoder();
 var decoder = new TextDecoder();
 var MAX_INT32 = 2 ** 32;
@@ -29,7 +167,7 @@ function encode(string) {
 }
 __name(encode, "encode");
 
-// node_modules/jose/dist/webapi/lib/base64.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/base64.js
 function decodeBase64(encoded) {
   if (Uint8Array.fromBase64) {
     return Uint8Array.fromBase64(encoded);
@@ -43,7 +181,7 @@ function decodeBase64(encoded) {
 }
 __name(decodeBase64, "decodeBase64");
 
-// node_modules/jose/dist/webapi/util/base64url.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/util/base64url.js
 function decode(input) {
   if (Uint8Array.fromBase64) {
     return Uint8Array.fromBase64(typeof input === "string" ? input : decoder.decode(input), {
@@ -63,7 +201,7 @@ function decode(input) {
 }
 __name(decode, "decode");
 
-// node_modules/jose/dist/webapi/util/errors.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/util/errors.js
 var JOSEError = class extends Error {
   static {
     __name(this, "JOSEError");
@@ -185,7 +323,7 @@ var JWSSignatureVerificationFailed = class extends JOSEError {
   }
 };
 
-// node_modules/jose/dist/webapi/lib/crypto_key.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/crypto_key.js
 var unusable = /* @__PURE__ */ __name((name, prop = "algorithm.name") => new TypeError(`CryptoKey does not support this operation, its ${prop} must be ${name}`), "unusable");
 var isAlgorithm = /* @__PURE__ */ __name((algorithm, name) => algorithm.name === name, "isAlgorithm");
 function getHashLength(hash) {
@@ -277,7 +415,7 @@ function checkSigCryptoKey(key, alg, usage) {
 }
 __name(checkSigCryptoKey, "checkSigCryptoKey");
 
-// node_modules/jose/dist/webapi/lib/invalid_key_input.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/invalid_key_input.js
 function message(msg, actual, ...types) {
   types = types.filter(Boolean);
   if (types.length > 2) {
@@ -303,7 +441,7 @@ __name(message, "message");
 var invalidKeyInput = /* @__PURE__ */ __name((actual, ...types) => message("Key must be ", actual, ...types), "invalidKeyInput");
 var withAlg = /* @__PURE__ */ __name((alg, actual, ...types) => message(`Key for the ${alg} algorithm must be `, actual, ...types), "withAlg");
 
-// node_modules/jose/dist/webapi/lib/is_key_like.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_key_like.js
 var isCryptoKey = /* @__PURE__ */ __name((key) => {
   if (key?.[Symbol.toStringTag] === "CryptoKey")
     return true;
@@ -316,7 +454,7 @@ var isCryptoKey = /* @__PURE__ */ __name((key) => {
 var isKeyObject = /* @__PURE__ */ __name((key) => key?.[Symbol.toStringTag] === "KeyObject", "isKeyObject");
 var isKeyLike = /* @__PURE__ */ __name((key) => isCryptoKey(key) || isKeyObject(key), "isKeyLike");
 
-// node_modules/jose/dist/webapi/lib/is_disjoint.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_disjoint.js
 function isDisjoint(...headers) {
   const sources = headers.filter(Boolean);
   if (sources.length === 0 || sources.length === 1) {
@@ -340,7 +478,7 @@ function isDisjoint(...headers) {
 }
 __name(isDisjoint, "isDisjoint");
 
-// node_modules/jose/dist/webapi/lib/is_object.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_object.js
 var isObjectLike = /* @__PURE__ */ __name((value) => typeof value === "object" && value !== null, "isObjectLike");
 function isObject(input) {
   if (!isObjectLike(input) || Object.prototype.toString.call(input) !== "[object Object]") {
@@ -357,7 +495,7 @@ function isObject(input) {
 }
 __name(isObject, "isObject");
 
-// node_modules/jose/dist/webapi/lib/check_key_length.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/check_key_length.js
 function checkKeyLength(alg, key) {
   if (alg.startsWith("RS") || alg.startsWith("PS")) {
     const { modulusLength } = key.algorithm;
@@ -368,7 +506,7 @@ function checkKeyLength(alg, key) {
 }
 __name(checkKeyLength, "checkKeyLength");
 
-// node_modules/jose/dist/webapi/lib/jwk_to_key.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/jwk_to_key.js
 function subtleMapping(jwk) {
   let algorithm;
   let keyUsages;
@@ -480,7 +618,7 @@ async function jwkToKey(jwk) {
 }
 __name(jwkToKey, "jwkToKey");
 
-// node_modules/jose/dist/webapi/key/import.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/key/import.js
 async function importJWK(jwk, alg, options) {
   if (!isObject(jwk)) {
     throw new TypeError("JWK must be an object");
@@ -517,7 +655,7 @@ async function importJWK(jwk, alg, options) {
 }
 __name(importJWK, "importJWK");
 
-// node_modules/jose/dist/webapi/lib/validate_crit.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/validate_crit.js
 function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader, joseHeader) {
   if (joseHeader.crit !== void 0 && protectedHeader?.crit === void 0) {
     throw new Err('"crit" (Critical) Header Parameter MUST be integrity protected');
@@ -549,7 +687,7 @@ function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader,
 }
 __name(validateCrit, "validateCrit");
 
-// node_modules/jose/dist/webapi/lib/validate_algorithms.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/validate_algorithms.js
 function validateAlgorithms(option, algorithms) {
   if (algorithms !== void 0 && (!Array.isArray(algorithms) || algorithms.some((s) => typeof s !== "string"))) {
     throw new TypeError(`"${option}" option must be an array of strings`);
@@ -561,13 +699,13 @@ function validateAlgorithms(option, algorithms) {
 }
 __name(validateAlgorithms, "validateAlgorithms");
 
-// node_modules/jose/dist/webapi/lib/is_jwk.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_jwk.js
 var isJWK = /* @__PURE__ */ __name((key) => isObject(key) && typeof key.kty === "string", "isJWK");
 var isPrivateJWK = /* @__PURE__ */ __name((key) => key.kty !== "oct" && (key.kty === "AKP" && typeof key.priv === "string" || typeof key.d === "string"), "isPrivateJWK");
 var isPublicJWK = /* @__PURE__ */ __name((key) => key.kty !== "oct" && key.d === void 0 && key.priv === void 0, "isPublicJWK");
 var isSecretJWK = /* @__PURE__ */ __name((key) => key.kty === "oct" && typeof key.k === "string", "isSecretJWK");
 
-// node_modules/jose/dist/webapi/lib/normalize_key.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/normalize_key.js
 var cache;
 var handleJWK = /* @__PURE__ */ __name(async (key, jwk, alg, freeze = false) => {
   cache ||= /* @__PURE__ */ new WeakMap();
@@ -739,7 +877,7 @@ async function normalizeKey(key, alg) {
 }
 __name(normalizeKey, "normalizeKey");
 
-// node_modules/jose/dist/webapi/lib/check_key_type.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/check_key_type.js
 var tag = /* @__PURE__ */ __name((key) => key?.[Symbol.toStringTag], "tag");
 var jwkMatchesOp = /* @__PURE__ */ __name((alg, key, usage) => {
   if (key.use !== void 0) {
@@ -860,7 +998,7 @@ function checkKeyType(alg, key, usage) {
 }
 __name(checkKeyType, "checkKeyType");
 
-// node_modules/jose/dist/webapi/lib/subtle_dsa.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/subtle_dsa.js
 function subtleAlgorithm(alg, algorithm) {
   const hash = `SHA-${alg.slice(-3)}`;
   switch (alg) {
@@ -893,7 +1031,7 @@ function subtleAlgorithm(alg, algorithm) {
 }
 __name(subtleAlgorithm, "subtleAlgorithm");
 
-// node_modules/jose/dist/webapi/lib/get_sign_verify_key.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/get_sign_verify_key.js
 async function getSigKey(alg, key, usage) {
   if (key instanceof Uint8Array) {
     if (!alg.startsWith("HS")) {
@@ -906,7 +1044,7 @@ async function getSigKey(alg, key, usage) {
 }
 __name(getSigKey, "getSigKey");
 
-// node_modules/jose/dist/webapi/lib/verify.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/verify.js
 async function verify(alg, key, signature, data) {
   const cryptoKey = await getSigKey(alg, key, "verify");
   checkKeyLength(alg, cryptoKey);
@@ -919,7 +1057,7 @@ async function verify(alg, key, signature, data) {
 }
 __name(verify, "verify");
 
-// node_modules/jose/dist/webapi/jws/flattened/verify.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/jws/flattened/verify.js
 async function flattenedVerify(jws, key, options) {
   if (!isObject(jws)) {
     throw new JWSInvalid("Flattened JWS must be an object");
@@ -1022,7 +1160,7 @@ async function flattenedVerify(jws, key, options) {
 }
 __name(flattenedVerify, "flattenedVerify");
 
-// node_modules/jose/dist/webapi/jws/compact/verify.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/jws/compact/verify.js
 async function compactVerify(jws, key, options) {
   if (jws instanceof Uint8Array) {
     jws = decoder.decode(jws);
@@ -1043,7 +1181,7 @@ async function compactVerify(jws, key, options) {
 }
 __name(compactVerify, "compactVerify");
 
-// node_modules/jose/dist/webapi/lib/jwt_claims_set.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/jwt_claims_set.js
 var epoch = /* @__PURE__ */ __name((date) => Math.floor(date.getTime() / 1e3), "epoch");
 var minute = 60;
 var hour = minute * 60;
@@ -1202,7 +1340,7 @@ function validateClaimsSet(protectedHeader, encodedPayload, options = {}) {
 }
 __name(validateClaimsSet, "validateClaimsSet");
 
-// node_modules/jose/dist/webapi/jwt/verify.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/jwt/verify.js
 async function jwtVerify(jwt, key, options) {
   const verified = await compactVerify(jwt, key, options);
   if (verified.protectedHeader.crit?.includes("b64") && verified.protectedHeader.b64 === false) {
@@ -1217,7 +1355,7 @@ async function jwtVerify(jwt, key, options) {
 }
 __name(jwtVerify, "jwtVerify");
 
-// node_modules/jose/dist/webapi/jwks/local.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/jwks/local.js
 function getKtyFromAlg(alg) {
   switch (typeof alg === "string" && alg.slice(0, 2)) {
     case "RS":
@@ -1340,7 +1478,7 @@ function createLocalJWKSet(jwks) {
 }
 __name(createLocalJWKSet, "createLocalJWKSet");
 
-// node_modules/jose/dist/webapi/jwks/remote.js
+// ../../pml-games190/server/node_modules/jose/dist/webapi/jwks/remote.js
 function isCloudflareWorkers() {
   return typeof WebSocketPair !== "undefined" || typeof navigator !== "undefined" && true || typeof EdgeRuntime !== "undefined" && EdgeRuntime === "vercel";
 }
@@ -1510,98 +1648,6 @@ function createRemoteJWKSet(url, options) {
 }
 __name(createRemoteJWKSet, "createRemoteJWKSet");
 
-// engine.mjs
-var GameError = class extends Error {
-  static {
-    __name(this, "GameError");
-  }
-  constructor(message2, status = 400) {
-    super(message2);
-    this.status = status;
-  }
-};
-function dateAR(now = Date.now()) {
-  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short" }).formatToParts(new Date(now));
-  const x = Object.fromEntries(f.map((p) => [p.type, p.value]));
-  return { day: `${x.year}-${x.month}-${x.day}`, weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(x.weekday) };
-}
-__name(dateAR, "dateAR");
-function available(kind, now = Date.now()) {
-  const d = dateAR(now).weekday;
-  return kind === "mines" ? [1, 2].includes(d) : kind === "penalties" ? [3, 4].includes(d) : false;
-}
-__name(available, "available");
-function randomInt(n) {
-  const range = 4294967296, limit = range - range % n;
-  let x;
-  do {
-    x = crypto.getRandomValues(new Uint32Array(1))[0];
-  } while (x >= limit);
-  return x % n;
-}
-__name(randomInt, "randomInt");
-function createGame(kind, rng = randomInt) {
-  if (kind === "mines") {
-    const board = [...Array(15).fill(1), ...Array(10).fill(2), ...Array(5).fill(5), "x2", "x4", "x6", "mine", "mine", "mine"];
-    for (let i = board.length - 1; i > 0; i--) {
-      const j = rng(i + 1);
-      [board[i], board[j]] = [board[j], board[i]];
-    }
-    return { secret: board, state: { revealed: [], total: 0, mines: 0 }, status: "active", payout: 0 };
-  }
-  if (kind === "penalties") return { secret: Array.from({ length: 5 }, () => rng(3)), state: { shots: [], goals: 0 }, status: "active", payout: 0 };
-  throw new GameError("Juego inexistente.");
-}
-__name(createGame, "createGame");
-function playGame(g, action) {
-  if (g.status !== "active") throw new GameError("La partida ya termin\xF3.", 409);
-  const next = structuredClone(g), s = next.state;
-  if (g.kind === "mines") {
-    if (action.type === "cashout") {
-      next.status = "won";
-      next.payout = s.total;
-      return next;
-    }
-    const i = action.cell;
-    if (action.type !== "reveal" || !Number.isInteger(i) || i < 0 || i >= 36) throw new GameError("Eleg\xED una casilla v\xE1lida.");
-    if (s.revealed.includes(i)) throw new GameError("Esa casilla ya est\xE1 descubierta.", 409);
-    s.revealed.push(i);
-    const cell = g.secret[i];
-    if (cell === "mine") {
-      s.mines++;
-      if (s.mines === 3) {
-        s.total = 0;
-        next.status = "lost";
-      }
-    } else if (typeof cell === "string") s.total *= Number(cell.slice(1));
-    else s.total += cell;
-    if (next.status === "active" && s.revealed.length === 36) {
-      next.status = "won";
-      next.payout = s.total;
-    }
-  } else {
-    if (action.type !== "shoot" || !Number.isInteger(action.direction) || action.direction < 0 || action.direction > 2) throw new GameError("Eleg\xED izquierda, centro o derecha.");
-    const keeper = g.secret[s.shots.length], goal = action.direction !== keeper;
-    s.shots.push({ direction: action.direction, keeper, goal });
-    if (goal) s.goals++;
-    if (s.shots.length === 5) {
-      next.payout = [0, 0, 10, 25, 50, 100][s.goals];
-      next.status = next.payout ? "won" : "lost";
-    }
-  }
-  return next;
-}
-__name(playGame, "playGame");
-function publicGame(row) {
-  if (!row) return null;
-  const secret = typeof row.secret === "string" ? JSON.parse(row.secret) : row.secret;
-  const state = typeof row.state === "string" ? JSON.parse(row.state) : row.state;
-  const out = { id: row.id, kind: row.kind, day: row.day, status: row.status, version: row.version, state, payout: row.payout };
-  if (row.kind === "mines") out.cells = secret.map((v, i) => state.revealed.includes(i) || row.status !== "active" ? v : null);
-  return out;
-}
-__name(publicGame, "publicGame");
-
 // auth.mjs
 var keys = createRemoteJWKSet(new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"));
 async function verifyToken(token, project, keyset = keys) {
@@ -1631,7 +1677,7 @@ async function handle(request, env, identity = null, now = Date.now()) {
   const path = new URL(request.url).pathname;
   if (path === "/health" && request.method === "GET") {
     await env.DB.prepare("SELECT uid FROM wallets LIMIT 1").bind().first();
-    return response({ service: "pml-games", version: "1.9.0", rules: 1 });
+    return response({ service: "pml-games", version: "1.9.2", rules: 1, practice: true });
   }
   if (!["GET", "POST"].includes(request.method)) throw new GameError("M\xE9todo no permitido.", 405);
   const user = identity || await authenticate(request, env), uid = user.sub;
@@ -1648,6 +1694,10 @@ async function handle(request, env, identity = null, now = Date.now()) {
       throw new GameError("Solicitud inv\xE1lida.");
     }
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new GameError("Solicitud inv\xE1lida.");
+  }
+  if (path.startsWith("/practice/")) {
+    if (request.method !== "POST") throw new GameError("M\xE9todo no permitido.", 405);
+    return response(await practice(path, body, user, q, now));
   }
   await q("INSERT OR IGNORE INTO wallets(uid,name,created_at) VALUES(?,?,?)", uid, cleanName(user.name) || "Jugador " + uid.slice(-5), now).run();
   if (path === "/me" && request.method === "POST") {

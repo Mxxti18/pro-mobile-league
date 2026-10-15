@@ -8,7 +8,7 @@ const mf=new Miniflare({modules:true,scriptPath:new URL('../dist/worker.js',impo
 try{
  const db=await mf.getD1Database('DB');
  // D1 exec accepts one SQL statement per line; apply complete trigger bodies with prepared statements.
- const schema=readFileSync(new URL('../schema.sql',import.meta.url),'utf8');
+ const schema=readFileSync(new URL('../schema.sql',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../practice-schema.sql',import.meta.url),'utf8');
  const statements=schema.match(/CREATE TRIGGER[\s\S]*?END;|(?:PRAGMA|CREATE TABLE|CREATE INDEX)[^;]*;/g);
  await db.batch(statements.map(s=>db.prepare(s)));
  let r=await mf.dispatchFetch('http://localhost/health');assert.equal(r.status,200);assert.equal((await r.json()).service,'pml-games');
@@ -34,5 +34,14 @@ try{
   const wallet=await invoke('/me',{});assert.equal(wallet.data.wallet.balance,kind==='penalties'?575:475);
   const repeated=await invoke('/games/action',{id:game.id,version:game.version-1,action:{type:'cashout'}});assert.equal(repeated.status,409);
  }
+ const creator='iCLoGhjbXNgY3Q7dbxX0456vagI2';
+ const creatorToken=await new SignJWT({auth_time:now,name:'Creador'}).setProtectedHeader({alg:'RS256',kid:'test-key'}).setSubject(creator).setIssuer('https://securetoken.google.com/pro-mobile-league').setAudience('pro-mobile-league').setIssuedAt(now).setExpirationTime(now+3600).sign(privateKey);
+ const privateCall=async(path,body)=>{const r=await mf.dispatchFetch('http://localhost'+path,{method:'POST',headers:{Authorization:'Bearer '+creatorToken,'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
+ assert.equal((await invoke('/practice/me',{})).status,403);
+ const pr=await privateCall('/practice/games/start',{kind:'mines'});assert.equal(pr.status,200);assert(pr.data.practice);assert.equal(pr.data.wallet.balance,475);
+ assert.equal(await db.prepare('SELECT uid FROM wallets WHERE uid=?').bind(creator).first(),null);
+ const pg=pr.data.games[0];const moves=await Promise.all([privateCall('/practice/games/action',{id:pg.id,version:0,action:{type:'cashout'}}),privateCall('/practice/games/action',{id:pg.id,version:0,action:{type:'cashout'}})]);assert.deepEqual(moves.map(x=>x.status).sort(),[200,409]);
+ const reset=await privateCall('/practice/reset',{});assert.equal(reset.data.wallet.balance,500);assert.equal(reset.data.games.length,0);
+ console.log('PASS workerd practice: creator only, separate state, CAS replay protection, reset, no real wallet created');
  console.log('PASS real workerd/D1: RSA JWT login (mocked public-key endpoint), schema/triggers, initial500, daily ticket idempotency, server game and payout, stale replay rejection, missing/forged auth blocked');
 }finally{await mf.dispose();}

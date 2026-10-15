@@ -1,4 +1,4 @@
-# PML Juegos 1.9.0
+# PML Juegos 1.9.2
 
 Servidor para fichas virtuales de PML Torneos: Cloudflare Workers + D1. No requiere Firebase Blaze. Autentica las cuentas existentes mediante tokens de Firebase y las claves públicas de Google. No contiene credenciales privadas.
 
@@ -57,3 +57,12 @@ La interfaz de APK fue probada en Chromium móvil con respuestas HTTP simuladas;
 Apuestas (selección de partidos y liquidación), publicaciones por fichas y moderación. Esta entrega incluye los dos juegos y la billetera; no activa automáticamente esas funciones.
 
 Referencias: https://developers.cloudflare.com/workers/get-started/dashboard/ · https://developers.cloudflare.com/d1/get-started/ · https://firebase.google.com/docs/auth/admin/verify-id-tokens
+
+
+## Actualizar desde 1.9.0 / modo privado
+
+No borrar ni volver a crear la base D1. En su consola ejecutar únicamente `practice-schema.sql`; agrega una tabla independiente, sin modificar saldos o partidas reales. Luego reemplazar el código del Worker con el contenido completo de `dist/worker.js` y publicar. Mantener el binding DB apuntando a pml-juegos. Al abrir /health debe figurar version 1.9.2 y practice true.
+
+La APK 1.9.2 incorpora ENTRAR EN PRUEBA, visible solo para el creador con UID iCLoGhjbXNgY3Q7dbxX0456vagI2. El servidor usa ese UID fijo, independiente de roles y del OWNER_UID configurable. Cada prueba tiene saldo y movimientos separados dentro de practice_sessions. Se puede jugar cualquier día, repetir al terminar y reiniciar a500. No crea ni modifica las billeteras ni el ranking reales. Las rutas de prueba requieren autenticación y control de versión.
+
+El botón aparece en la APK antes de actualizar el servidor, pero el modo no funciona hasta aplicar ambos pasos. Los juegos reales mantienen las reglas actuales.
