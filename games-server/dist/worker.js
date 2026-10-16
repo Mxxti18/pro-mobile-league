@@ -141,6 +141,118 @@ function fixtures(s) {
 }
 __name(fixtures, "fixtures");
 
+// posts.mjs
+var validID = /* @__PURE__ */ __name((id) => typeof id === "string" && /^[-a-zA-Z0-9]{16,64}$/.test(id), "validID");
+var publicPost = /* @__PURE__ */ __name((p) => ({ id: p.id, uid: p.uid, author: p.author, season: p.season, cost: p.cost, status: p.status, version: p.version, content: JSON.parse(p.payload), reason: p.reason, createdAt: p.created_at, updatedAt: p.updated_at }), "publicPost");
+function validate(s, p, complete = false) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) throw new GameError("Noticia inv\xE1lida.");
+  const title = typeof p.title === "string" ? p.title.trim() : "", body = typeof p.body === "string" ? p.body.trim() : "", division = String(p.division ?? "general"), team = typeof p.team === "string" ? p.team : "general", image = typeof p.image === "string" ? p.image : "";
+  if (title.length > 200 || body.length > 6e3) throw new GameError("El t\xEDtulo o el texto superan el l\xEDmite.");
+  if (!["general", "0", "1", "2", "cup"].includes(division)) throw new GameError("Divisi\xF3n inv\xE1lida.");
+  if (division !== "general" && s.activeCompetitions?.[division === "cup" ? 3 : Number(division)] === false) throw new GameError("Esa competici\xF3n est\xE1 desactivada.", 409);
+  const groups = (s.groups || []).filter((_, d) => s.activeCompetitions?.[d] !== false);
+  if (team !== "general" && (!groups.flat().includes(team) || division !== "general" && division !== "cup" && !s.groups[Number(division)]?.includes(team))) throw new GameError("El equipo no pertenece a una divisi\xF3n activa.");
+  if (image) {
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image);
+    if (!m || image.length > 14e5) throw new GameError("Eleg\xED una imagen JPG, PNG o WebP de hasta 1 MB.");
+    let bytes;
+    try {
+      bytes = atob(m[2]);
+    } catch {
+      throw new GameError("Imagen inv\xE1lida.");
+    }
+    const ok = m[1] === "jpeg" ? bytes.startsWith("\xFF\xD8\xFF") : m[1] === "png" ? bytes.startsWith("\x89PNG\r\n\n") : bytes.startsWith("RIFF") && bytes.slice(8, 12) === "WEBP";
+    if (!ok) throw new GameError("Imagen inv\xE1lida.");
+  }
+  if (complete && (!title || !image)) throw new GameError("Complet\xE1 el t\xEDtulo y eleg\xED una imagen.");
+  return { title, body, division, team, image };
+}
+__name(validate, "validate");
+async function posts(path, body, user, { request, env, db, now }) {
+  const uid = user.sub, q = /* @__PURE__ */ __name((sql, ...v) => db.prepare(sql).bind(...v), "q"), method = request.method;
+  const reading = ["/posts/mine", "/posts/feed", "/posts/queue"].includes(path);
+  if (method !== (reading ? "GET" : "POST")) throw new GameError("M\xE9todo no permitido.", 405);
+  if (path === "/posts/mine") {
+    const rows = await q("SELECT * FROM news_posts WHERE uid=? ORDER BY (status='draft') DESC,created_at DESC LIMIT 10", uid).all();
+    return { posts: rows.results.map(publicPost) };
+  }
+  if (path === "/posts/queue") {
+    if (!await moderator(request, env, uid)) throw new GameError("Solo los administradores pueden revisar noticias.", 403);
+    const rows = await q("SELECT * FROM news_posts WHERE status='pending' ORDER BY created_at LIMIT 10").all();
+    return { posts: rows.results.map(publicPost) };
+  }
+  const state = await league(request, env), seasonID = reading ? new URL(request.url).searchParams.get("season") : body.season, s = state.seasons?.find((s2) => s2.id === seasonID);
+  if (path === "/posts/feed") {
+    if (!s) throw new GameError("Temporada inexistente.", 404);
+    const raw = new URL(request.url).searchParams.get("before"), parts = raw?.split(":");
+    if (raw && (!/^\d{1,16}$/.test(parts[0]) || !validID(parts[1]))) throw new GameError("P\xE1gina inv\xE1lida.");
+    const time = parts ? Number(parts[0]) : Number.MAX_SAFE_INTEGER, id = parts ? parts[1] : "\uFFFF";
+    const rows = await q("SELECT * FROM news_posts WHERE status='approved' AND season=? AND (updated_at<? OR (updated_at=? AND id<?)) ORDER BY updated_at DESC,id DESC LIMIT 6", s.id, time, time, id).all();
+    return { posts: rows.results.filter((p) => {
+      try {
+        validate(s, JSON.parse(p.payload));
+        return true;
+      } catch {
+        return false;
+      }
+    }).map(publicPost), next: rows.results.length === 6 ? rows.results.at(-1).updated_at + ":" + rows.results.at(-1).id : null };
+  }
+  if (path === "/posts/buy") {
+    if (!validID(body.id) || !s || s.closed) throw new GameError("Eleg\xED una temporada abierta.");
+    const old = await q("SELECT * FROM news_posts WHERE id=?", body.id).first();
+    if (old) {
+      if (old.uid !== uid || old.season !== s.id) throw new GameError("Solicitud ya utilizada.", 409);
+      return { post: publicPost(old) };
+    }
+    const draft = await q("SELECT * FROM news_posts WHERE uid=? AND status='draft'", uid).first();
+    if (draft) return { post: publicPost(draft) };
+    const free = await moderator(request, env, uid);
+    await q("INSERT OR IGNORE INTO wallets(uid,name,created_at) VALUES(?,?,?)", uid, String(user.name || "Jugador").slice(0, 40), now).run();
+    const wallet = await q("SELECT name FROM wallets WHERE uid=?", uid).first();
+    try {
+      await q("INSERT INTO news_posts(id,uid,author,season,cost,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", body.id, uid, wallet.name, s.id, free ? 0 : 250, now, now).run();
+    } catch (e) {
+      const concurrent = await q("SELECT * FROM news_posts WHERE uid=? AND status='draft'", uid).first();
+      if (concurrent) return { post: publicPost(concurrent) };
+      const w = await q("SELECT balance FROM wallets WHERE uid=?", uid).first();
+      if (w?.balance < 250) throw new GameError("Necesit\xE1s 250 fichas para crear una noticia.", 409);
+      throw e;
+    }
+    return { post: publicPost(await q("SELECT * FROM news_posts WHERE id=?", body.id).first()) };
+  }
+  const row = validID(body.id) ? await q("SELECT * FROM news_posts WHERE id=?", body.id).first() : null;
+  if (!row) throw new GameError("Noticia no encontrada.", 404);
+  if (path === "/posts/review") {
+    if (!await moderator(request, env, uid)) throw new GameError("Solo los administradores pueden revisar noticias.", 403);
+    if (!["approved", "rejected"].includes(body.decision)) throw new GameError("Decisi\xF3n inv\xE1lida.");
+    if (row.status === body.decision) return { post: publicPost(row) };
+    if (row.status !== "pending") throw new GameError("Esta noticia ya fue revisada.", 409);
+    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 300) : "";
+    if (body.decision === "rejected" && !reason) throw new GameError("Indic\xE1 el motivo del rechazo.");
+    if (body.decision === "approved") {
+      const target = state.seasons?.find((s2) => s2.id === row.season);
+      if (!target) throw new GameError("Temporada inexistente.", 409);
+      validate(target, JSON.parse(row.payload), true);
+    }
+    const changed = await q("UPDATE news_posts SET status=?,reason=?,reviewer=?,version=version+1,updated_at=? WHERE id=? AND status='pending' AND version=? RETURNING id", body.decision, reason, uid, now, row.id, row.version).first();
+    if (!changed) throw new GameError("Otro administrador ya revis\xF3 esta noticia. Actualiz\xE1.", 409);
+  } else if (["/posts/save", "/posts/submit"].includes(path)) {
+    if (row.uid !== uid) throw new GameError("Esta noticia pertenece a otra persona.", 403);
+    if (row.status !== "draft") {
+      if (path === "/posts/submit" && ["pending", "approved"].includes(row.status) && body.version === row.version - 1) return { post: publicPost(row) };
+      throw new GameError("La noticia enviada ya no se puede editar.", 409);
+    }
+    const target = state.seasons?.find((s2) => s2.id === row.season);
+    if (!target || target.closed) throw new GameError("La temporada est\xE1 cerrada. Tu borrador se conserva.", 409);
+    const payload = validate(target, body.content, path === "/posts/submit"), status = path === "/posts/save" ? "draft" : row.cost === 0 && await moderator(request, env, uid) ? "approved" : "pending";
+    if (!Number.isInteger(body.version)) throw new GameError("Versi\xF3n inv\xE1lida.");
+    const changed = await q("UPDATE news_posts SET payload=?,status=?,version=version+1,updated_at=? WHERE id=? AND uid=? AND status='draft' AND version=? RETURNING id", JSON.stringify(payload), status, now, row.id, uid, body.version).first();
+    if (!changed) throw new GameError("El borrador cambi\xF3 en otro dispositivo. Actualiz\xE1 antes de seguir.", 409);
+  } else throw new GameError("Ruta inexistente.", 404);
+  return { post: publicPost(await q("SELECT * FROM news_posts WHERE id=?", row.id).first()) };
+}
+__name(posts, "posts");
+
 // bets.mjs
 var START = Date.parse("2026-10-19T00:00:00-03:00");
 function periodTime(now) {
@@ -1865,17 +1977,18 @@ async function handle(request, env, identity = null, now = Date.now()) {
   const path = new URL(request.url).pathname;
   if (path === "/health" && request.method === "GET") {
     await env.DB.prepare("SELECT uid FROM wallets LIMIT 1").bind().first();
-    return response({ service: "pml-games", version: "1.9.5", rules: 1, practice: true, bets: true });
+    return response({ service: "pml-games", version: "1.9.8", rules: 1, practice: true, bets: true, posts: true });
   }
   if (!["GET", "POST"].includes(request.method)) throw new GameError("M\xE9todo no permitido.", 405);
   const user = identity || await authenticate(request, env), uid = user.sub;
   const db = env.DB.withSession ? env.DB.withSession("first-primary") : env.DB;
   const q = /* @__PURE__ */ __name((sql, ...v) => db.prepare(sql).bind(...v), "q");
-  if (request.method === "POST" && Number(request.headers.get("Content-Length") || 0) > 4096) throw new GameError("Solicitud demasiado grande.", 413);
+  const bodyLimit = path.startsWith("/posts/") ? 145e4 : 4096;
+  if (request.method === "POST" && Number(request.headers.get("Content-Length") || 0) > bodyLimit) throw new GameError("Solicitud demasiado grande.", 413);
   let body = {};
   if (request.method === "POST") {
     const text = await request.text();
-    if (text.length > 4096) throw new GameError("Solicitud demasiado grande.", 413);
+    if (text.length > bodyLimit) throw new GameError("Solicitud demasiado grande.", 413);
     try {
       body = JSON.parse(text);
     } catch {
@@ -1883,6 +1996,7 @@ async function handle(request, env, identity = null, now = Date.now()) {
     }
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new GameError("Solicitud inv\xE1lida.");
   }
+  if (path.startsWith("/posts/")) return response(await posts(path, body, user, { request, env, db, now }));
   if (path.startsWith("/bets/") || path.startsWith("/practice/bets/")) return response(await bets(path, body, user, { request, env, db, now }));
   if (path.startsWith("/practice/")) {
     if (request.method !== "POST") throw new GameError("M\xE9todo no permitido.", 405);

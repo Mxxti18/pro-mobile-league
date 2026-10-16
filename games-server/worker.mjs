@@ -1,3 +1,4 @@
+import {posts} from './posts.mjs';
 import {bets} from './bets.mjs';
 import {practice} from './practice.mjs';
 import {authenticate} from './auth.mjs';
@@ -8,13 +9,15 @@ const cleanName=(n)=>typeof n==='string'?n.trim().slice(0,40):'';
 export async function handle(request,env,identity=null,now=Date.now()){
  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:cors});
  const path=new URL(request.url).pathname;
- if(path==='/health'&&request.method==='GET'){await env.DB.prepare('SELECT uid FROM wallets LIMIT 1').bind().first();return response({service:'pml-games',version:'1.9.5',rules:1,practice:true,bets:true});}
+ if(path==='/health'&&request.method==='GET'){await env.DB.prepare('SELECT uid FROM wallets LIMIT 1').bind().first();return response({service:'pml-games',version:'1.9.8',rules:1,practice:true,bets:true,posts:true});}
  if(!['GET','POST'].includes(request.method))throw new GameError('Método no permitido.',405);
  const user=identity||await authenticate(request,env),uid=user.sub;
  const db=env.DB.withSession?env.DB.withSession('first-primary'):env.DB;
  const q=(sql,...v)=>db.prepare(sql).bind(...v);
- if(request.method==='POST'&&Number(request.headers.get('Content-Length')||0)>4096)throw new GameError('Solicitud demasiado grande.',413);
- let body={};if(request.method==='POST'){const text=await request.text();if(text.length>4096)throw new GameError('Solicitud demasiado grande.',413);try{body=JSON.parse(text);}catch{throw new GameError('Solicitud inválida.');}if(!body||typeof body!=='object'||Array.isArray(body))throw new GameError('Solicitud inválida.');}
+ const bodyLimit=path.startsWith('/posts/')?1450000:4096;
+ if(request.method==='POST'&&Number(request.headers.get('Content-Length')||0)>bodyLimit)throw new GameError('Solicitud demasiado grande.',413);
+ let body={};if(request.method==='POST'){const text=await request.text();if(text.length>bodyLimit)throw new GameError('Solicitud demasiado grande.',413);try{body=JSON.parse(text);}catch{throw new GameError('Solicitud inválida.');}if(!body||typeof body!=='object'||Array.isArray(body))throw new GameError('Solicitud inválida.');}
+ if(path.startsWith('/posts/'))return response(await posts(path,body,user,{request,env,db,now}));
  if(path.startsWith('/bets/')||path.startsWith('/practice/bets/'))return response(await bets(path,body,user,{request,env,db,now}));
  if(path.startsWith('/practice/')){if(request.method!=='POST')throw new GameError('Método no permitido.',405);return response(await practice(path,body,user,q,now));}
  await q('INSERT OR IGNORE INTO wallets(uid,name,created_at) VALUES(?,?,?)',uid,cleanName(user.name)||'Jugador '+uid.slice(-5),now).run();
