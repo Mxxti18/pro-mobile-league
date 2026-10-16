@@ -164,7 +164,8 @@ function validate(s, p, complete = false) {
     const ok = m[1] === "jpeg" ? bytes.startsWith("\xFF\xD8\xFF") : m[1] === "png" ? bytes.startsWith("\x89PNG\r\n\n") : bytes.startsWith("RIFF") && bytes.slice(8, 12) === "WEBP";
     if (!ok) throw new GameError("Imagen inv\xE1lida.");
   }
-  if (complete && (!title || !image)) throw new GameError("Complet\xE1 el t\xEDtulo y eleg\xED una imagen.");
+  if (complete && !title) throw new GameError("Complet\xE1 el t\xEDtulo.");
+  if (complete && !image) throw new GameError("Eleg\xED una imagen.");
   return { title, body, division, team, image };
 }
 __name(validate, "validate");
@@ -173,13 +174,25 @@ async function posts(path, body, user, { request, env, db, now }) {
   const reading = ["/posts/mine", "/posts/feed", "/posts/queue"].includes(path);
   if (method !== (reading ? "GET" : "POST")) throw new GameError("M\xE9todo no permitido.", 405);
   if (path === "/posts/mine") {
-    const rows = await q("SELECT * FROM news_posts WHERE uid=? ORDER BY (status='draft') DESC,created_at DESC LIMIT 10", uid).all();
+    const rows = await q("SELECT * FROM news_posts WHERE uid=? AND id NOT IN (SELECT post_id FROM news_withdrawals) ORDER BY (status='draft') DESC,created_at DESC LIMIT 10", uid).all();
     return { posts: rows.results.map(publicPost) };
   }
   if (path === "/posts/queue") {
     if (!await moderator(request, env, uid)) throw new GameError("Solo los administradores pueden revisar noticias.", 403);
     const rows = await q("SELECT * FROM news_posts WHERE status='pending' ORDER BY created_at LIMIT 10").all();
     return { posts: rows.results.map(publicPost) };
+  }
+  if (path === "/posts/withdraw") {
+    if (!validID(body.id)) throw new GameError("Noticia inv\xE1lida.");
+    const row2 = await q("SELECT * FROM news_posts WHERE id=?", body.id).first();
+    if (!row2) throw new GameError("Noticia no encontrada.", 404);
+    if (row2.uid !== uid) throw new GameError("Solo el autor puede retirarla.", 403);
+    const previous = await q("SELECT post_id FROM news_withdrawals WHERE post_id=? AND uid=?", row2.id, uid).first();
+    if (previous) return { ok: true, refunded: row2.cost };
+    if (!["draft", "pending"].includes(row2.status)) throw new GameError("La noticia ya fue revisada y no puede retirarse con devoluci\xF3n.", 409);
+    await q("INSERT OR IGNORE INTO news_withdrawals(post_id,uid,previous_status,at) SELECT id,uid,status,? FROM news_posts WHERE id=? AND uid=? AND version=? AND status IN('draft','pending')", now, row2.id, uid, row2.version).run();
+    if (!await q("SELECT post_id FROM news_withdrawals WHERE post_id=? AND uid=?", row2.id, uid).first()) throw new GameError("La noticia acaba de ser revisada. Actualiz\xE1 para ver su estado.", 409);
+    return { ok: true, refunded: row2.cost };
   }
   const state = await league(request, env), seasonID = reading ? new URL(request.url).searchParams.get("season") : body.season, s = state.seasons?.find((s2) => s2.id === seasonID);
   if (path === "/posts/feed") {
@@ -1977,7 +1990,7 @@ async function handle(request, env, identity = null, now = Date.now()) {
   const path = new URL(request.url).pathname;
   if (path === "/health" && request.method === "GET") {
     await env.DB.prepare("SELECT uid FROM wallets LIMIT 1").bind().first();
-    return response({ service: "pml-games", version: "1.9.8", rules: 1, practice: true, bets: true, posts: true });
+    return response({ service: "pml-games", version: "1.9.9", rules: 1, practice: true, bets: true, posts: true });
   }
   if (!["GET", "POST"].includes(request.method)) throw new GameError("M\xE9todo no permitido.", 405);
   const user = identity || await authenticate(request, env), uid = user.sub;

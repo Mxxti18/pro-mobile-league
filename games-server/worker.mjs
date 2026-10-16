@@ -9,7 +9,7 @@ const cleanName=(n)=>typeof n==='string'?n.trim().slice(0,40):'';
 export async function handle(request,env,identity=null,now=Date.now()){
  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:cors});
  const path=new URL(request.url).pathname;
- if(path==='/health'&&request.method==='GET'){await env.DB.prepare('SELECT uid FROM wallets LIMIT 1').bind().first();return response({service:'pml-games',version:'1.9.8',rules:1,practice:true,bets:true,posts:true});}
+ if(path==='/health'&&request.method==='GET'){await env.DB.prepare('SELECT uid FROM wallets LIMIT 1').bind().first();return response({service:'pml-games',version:'1.9.9',rules:1,practice:true,bets:true,posts:true});}
  if(!['GET','POST'].includes(request.method))throw new GameError('Método no permitido.',405);
  const user=identity||await authenticate(request,env),uid=user.sub;
  const db=env.DB.withSession?env.DB.withSession('first-primary'):env.DB;
@@ -76,4 +76,5 @@ export async function handle(request,env,identity=null,now=Date.now()){
  throw new GameError('Ruta inexistente.',404);
 }
 export default {async fetch(request,env){try{return await handle(request,{...env,FIREBASE_PROJECT_ID:env.FIREBASE_PROJECT_ID||'pro-mobile-league',OWNER_UID:env.OWNER_UID||'iCLoGhjbXNgY3Q7dbxX0456vagI2'});}catch(e){if(e instanceof GameError)return response({error:e.message},e.status);console.error('PML games failure',e?.name);return response({error:'El servidor no pudo completar la operación. Tu partida se conserva.'},503);}}};
+
 

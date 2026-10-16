@@ -11,14 +11,23 @@ function validate(s,p,complete=false){
  const groups=(s.groups||[]).filter((_,d)=>s.activeCompetitions?.[d]!==false);
  if(team!=='general'&&(!groups.flat().includes(team)||(division!=='general'&&division!=='cup'&&!s.groups[Number(division)]?.includes(team))))throw new GameError('El equipo no pertenece a una división activa.');
  if(image){const m=/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image);if(!m||image.length>1400000)throw new GameError('Elegí una imagen JPG, PNG o WebP de hasta 1 MB.');let bytes;try{bytes=atob(m[2]);}catch{throw new GameError('Imagen inválida.');}const ok=m[1]==='jpeg'?bytes.startsWith('\xff\xd8\xff'):m[1]==='png'?bytes.startsWith('\x89PNG\r\n\x1a\n'):bytes.startsWith('RIFF')&&bytes.slice(8,12)==='WEBP';if(!ok)throw new GameError('Imagen inválida.');}
- if(complete&&(!title||!image))throw new GameError('Completá el título y elegí una imagen.');
+ if(complete&&!title)throw new GameError('Completá el título.');if(complete&&!image)throw new GameError('Elegí una imagen.');
  return {title,body,division,team,image};
 }
 export async function posts(path,body,user,{request,env,db,now}){
  const uid=user.sub,q=(sql,...v)=>db.prepare(sql).bind(...v),method=request.method;
  const reading=['/posts/mine','/posts/feed','/posts/queue'].includes(path);if(method!==(reading?'GET':'POST'))throw new GameError('Método no permitido.',405);
- if(path==='/posts/mine'){const rows=await q("SELECT * FROM news_posts WHERE uid=? ORDER BY (status='draft') DESC,created_at DESC LIMIT 10",uid).all();return {posts:rows.results.map(publicPost)};}
+ if(path==='/posts/mine'){const rows=await q("SELECT * FROM news_posts WHERE uid=? AND id NOT IN (SELECT post_id FROM news_withdrawals) ORDER BY (status='draft') DESC,created_at DESC LIMIT 10",uid).all();return {posts:rows.results.map(publicPost)};}
  if(path==='/posts/queue'){if(!await moderator(request,env,uid))throw new GameError('Solo los administradores pueden revisar noticias.',403);const rows=await q("SELECT * FROM news_posts WHERE status='pending' ORDER BY created_at LIMIT 10").all();return {posts:rows.results.map(publicPost)};}
+ if(path==='/posts/withdraw'){
+  if(!validID(body.id))throw new GameError('Noticia inválida.');
+  const row=await q('SELECT * FROM news_posts WHERE id=?',body.id).first();if(!row)throw new GameError('Noticia no encontrada.',404);if(row.uid!==uid)throw new GameError('Solo el autor puede retirarla.',403);
+  const previous=await q('SELECT post_id FROM news_withdrawals WHERE post_id=? AND uid=?',row.id,uid).first();if(previous)return {ok:true,refunded:row.cost};
+  if(!['draft','pending'].includes(row.status))throw new GameError('La noticia ya fue revisada y no puede retirarse con devolución.',409);
+  await q("INSERT OR IGNORE INTO news_withdrawals(post_id,uid,previous_status,at) SELECT id,uid,status,? FROM news_posts WHERE id=? AND uid=? AND version=? AND status IN('draft','pending')",now,row.id,uid,row.version).run();
+  if(!await q('SELECT post_id FROM news_withdrawals WHERE post_id=? AND uid=?',row.id,uid).first())throw new GameError('La noticia acaba de ser revisada. Actualizá para ver su estado.',409);
+  return {ok:true,refunded:row.cost};
+ }
  const state=await league(request,env),seasonID=reading?new URL(request.url).searchParams.get('season'):body.season,s=state.seasons?.find(s=>s.id===seasonID);
  if(path==='/posts/feed'){
   if(!s)throw new GameError('Temporada inexistente.',404);
@@ -56,3 +65,4 @@ export async function posts(path,body,user,{request,env,db,now}){
  }else throw new GameError('Ruta inexistente.',404);
  return {post:publicPost(await q('SELECT * FROM news_posts WHERE id=?',row.id).first())};
 }
+

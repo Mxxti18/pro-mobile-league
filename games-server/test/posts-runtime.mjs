@@ -9,7 +9,7 @@ const owner='iCLoGhjbXNgY3Q7dbxX0456vagI2',now=Date.now(),season={id:'s1',closed
 let revision=0;const original=globalThis.fetch;
 globalThis.fetch=async url=>{if(String(url).includes('/roles/'))return Response.json({fields:{role:{stringValue:String(url).endsWith('/mod')?'moderator':'viewer'}}});const text=JSON.stringify(state),rev='r'+revision,hash=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))).toString('hex');return Response.json({fields:String(url).endsWith('/head')?{revision:{stringValue:rev},pages:{integerValue:'1'},hash:{stringValue:hash}}:{revision:{stringValue:rev},index:{integerValue:'0'},text:{stringValue:text}}});};
 try{
- const db=await mf.getD1Database('DB');for(const file of ['schema.sql','practice-schema.sql','bets-schema.sql','posts-schema.sql'])await db.batch(readFileSync(new URL('../'+file,import.meta.url),'utf8').split(/(?=^CREATE |^PRAGMA )/m).map(x=>x.trim()).filter(Boolean).map(s=>db.prepare(s)));
+ const db=await mf.getD1Database('DB');for(const file of ['schema.sql','practice-schema.sql','bets-schema.sql','posts-schema.sql','news-withdrawals-schema.sql'])await db.batch(readFileSync(new URL('../'+file,import.meta.url),'utf8').split(/(?=^CREATE |^PRAGMA )/m).map(x=>x.trim()).filter(Boolean).map(s=>db.prepare(s)));
  const env={DB:db,OWNER_UID:owner,FIREBASE_PROJECT_ID:'pro-mobile-league'},call=async(uid,path,body)=>{const r=await handle(new Request('https://example.test/posts/'+path,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer test','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}),env,{sub:uid,name:'Nombre '+uid},now);return r.json();},fails=(fn,status)=>assert.rejects(fn,e=>e.status===status),balance=async uid=>(await db.prepare('SELECT balance FROM wallets WHERE uid=?').bind(uid).first()).balance;
  const body={id:'news-request-00000001',season:'s1'},content={title:'Mi noticia',body:'Texto',division:'0',team:'a',image:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='};
  let p=(await call('user','buy',body)).post;assert.equal(p.cost,250);assert.equal(await balance('user'),250);
@@ -33,5 +33,17 @@ try{
  // Concurrent purchases create only one paid draft.
  await Promise.all([6,7].map(n=>call('racer','buy',{...body,id:'news-request-0000000'+n})));assert.equal(await balance('racer'),250);assert.equal((await call('racer','mine')).posts.length,1);
  await fails(async()=>call('racer','save',{id:(await call('racer','mine')).posts[0].id,version:0,content:{...content,image:'data:image/png;base64,PHNjcmlwdD4='}}),400);
+ // Withdrawal refunds draft/pending exactly once, hides it, and cannot race an approval into a double credit.
+ let w=(await call('withdrawer','buy',{...body,id:'withdraw-draft-000001'})).post;
+ await fails(()=>call('stranger','withdraw',{id:w.id}),403);
+ await call('withdrawer','withdraw',{id:w.id});await call('withdrawer','withdraw',{id:w.id});assert.equal(await balance('withdrawer'),500);assert.equal((await call('withdrawer','mine')).posts.length,0);
+ w=(await call('withdrawer','buy',{...body,id:'withdraw-pending-0001'})).post;await call('withdrawer','submit',{id:w.id,version:0,content});await call('withdrawer','withdraw',{id:w.id});assert.equal(await balance('withdrawer'),500);await fails(()=>call('mod','review',{id:w.id,decision:'approved'}),409);
+ w=(await call('withdrawer','buy',{...body,id:'withdraw-racing-00001'})).post;await call('withdrawer','submit',{id:w.id,version:0,content});
+ await Promise.allSettled([call('withdrawer','withdraw',{id:w.id}),call('mod','review',{id:w.id,decision:'approved'})]);
+ const wr=await db.prepare('SELECT * FROM news_posts WHERE id=?').bind(w.id).first();assert.equal(await balance('withdrawer'),wr.status==='approved'?250:500);
+ if(wr.status==='approved')await fails(()=>call('withdrawer','withdraw',{id:w.id}),409);
+ const free=(await call('mod','buy',{...body,id:'withdraw-free-0000001'})).post;await call('mod','withdraw',{id:free.id});assert.equal(await balance('mod'),500);
+ console.log('PASS withdrawals: own draft and pending, repeat request, hidden entries, no free-admin refund, approval race and approved withdrawal blocked');
  console.log('PASS D1 publications: charge once, paid draft resume, owner-only edit, version conflict, immutable pending, admin verification, no public pending leak, refund once, review race, free admin, active competition filtering, insufficient balance rollback and concurrent purchase');
 }finally{globalThis.fetch=original;await mf.dispose();}
+
