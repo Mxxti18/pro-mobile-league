@@ -93,6 +93,194 @@ function publicGame(row) {
 }
 __name(publicGame, "publicGame");
 
+// league.mjs
+async function firestore(request, env, path) {
+  const r = await fetch("https://firestore.googleapis.com/v1/projects/" + env.FIREBASE_PROJECT_ID + "/databases/(default)/documents/" + path, { headers: { Authorization: request.headers.get("Authorization") || "" }, signal: AbortSignal.timeout(12e3) });
+  if (!r.ok) throw new GameError("No se pudo verificar la liga en Firebase.", 503);
+  return (await r.json()).fields;
+}
+__name(firestore, "firestore");
+var cachedLeague = null;
+async function league(request, env) {
+  const h = await firestore(request, env, "leagues/main/data/head");
+  const revision = h.revision?.stringValue, n = Number(h.pages?.integerValue);
+  if (!revision || !Number.isInteger(n) || n < 1 || n > 240) throw new GameError("La liga no tiene un formato v\xE1lido.", 503);
+  if (cachedLeague?.revision === revision && cachedLeague.hash === h.hash?.stringValue) return cachedLeague.data;
+  let text = "";
+  for (let offset = 0; offset < n; offset += 6) {
+    const pages = await Promise.all(Array.from({ length: Math.min(6, n - offset) }, async (_, j) => {
+      const i = offset + j, p = await firestore(request, env, "leagues/main/data/" + encodeURIComponent(revision + "-" + i));
+      if (p.revision?.stringValue !== revision || Number(p.index?.integerValue) !== i) throw new GameError("La liga est\xE1 actualiz\xE1ndose.", 409);
+      return p.text?.stringValue || "";
+    }));
+    text += pages.join("");
+  }
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))), (b) => b.toString(16).padStart(2, "0")).join("");
+  if (hash !== h.hash?.stringValue) throw new GameError("No se pudo verificar la liga.", 503);
+  cachedLeague = { revision, hash, data: JSON.parse(text) };
+  return cachedLeague.data;
+}
+__name(league, "league");
+async function moderator(request, env, uid) {
+  if (uid === env.OWNER_UID) return true;
+  try {
+    return (await firestore(request, env, "roles/" + encodeURIComponent(uid))).role?.stringValue === "moderator";
+  } catch {
+    return false;
+  }
+}
+__name(moderator, "moderator");
+function fixtures(s) {
+  const out = [];
+  for (let d = 0; d < 3; d++) {
+    if (s.activeCompetitions?.[d] === false) continue;
+    (s.fixtures?.[d] || []).forEach((round, r) => round.forEach((m) => out.push({ ...m, competition: d, round: r + 1 })));
+  }
+  if (s.activeCompetitions?.[3] !== false) (s.cup?.rounds || []).forEach((round, r) => round.forEach((m) => out.push({ ...m, competition: "cup", round: r + 1 })));
+  return out.filter((m) => m.id && s.teams?.[m.h] && s.teams?.[m.w] && m.h !== m.w).map((m) => ({ ...m, home: s.teams[m.h], away: s.teams[m.w] }));
+}
+__name(fixtures, "fixtures");
+
+// bets.mjs
+var START = Date.parse("2026-10-19T00:00:00-03:00");
+function periodTime(now) {
+  const day2 = dateAR(now), d = /* @__PURE__ */ new Date(day2.day + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - (day2.weekday + 6) % 7);
+  const monday = d.toISOString().slice(0, 10);
+  return { week: monday, closes: d.getTime() + 4 * 864e5 + 4.5 * 36e5 };
+}
+__name(periodTime, "periodTime");
+function selectSix(s, used = []) {
+  const candidates = fixtures(s).filter((m) => m.a === null && m.b === null && !used.includes(m.id)), groups = [0, 1, 2, "cup"].map((d) => candidates.filter((m) => m.competition === d).sort((a, b) => a.round - b.round || a.id.localeCompare(b.id)));
+  const out = [];
+  while (out.length < 6 && groups.some((g) => g.length)) for (const g of groups) {
+    if (g.length && out.length < 6) out.push(g.shift());
+  }
+  return out;
+}
+__name(selectSix, "selectSix");
+var sameFixture = /* @__PURE__ */ __name((m, slot) => {
+  const i = JSON.parse(slot.info);
+  return m.h === i.h && m.w === i.w;
+}, "sameFixture");
+var info = /* @__PURE__ */ __name((m) => JSON.stringify({ id: m.id, h: m.h, w: m.w, home: m.home, away: m.away, competition: m.competition, round: m.round }), "info");
+async function bets(path, body, user, ctx) {
+  const { request, env, db, now } = ctx;
+  const uid = user.sub, trial = path.startsWith("/practice/bets/");
+  path = path.replace("/practice", "");
+  if (trial && uid !== env.OWNER_UID) throw new GameError("Prueba privada del creador.", 403);
+  const rename = /* @__PURE__ */ __name((sql) => trial ? sql.replace(/\b(bet_periods|bet_matches|bet_audit|bets|wallets|ledger)\b/g, (x) => ({ wallets: "trial_wallets", ledger: "trial_ledger" })[x] || "trial_" + x) : sql, "rename");
+  const q = /* @__PURE__ */ __name((sql, ...args) => db.prepare(rename(sql)).bind(...args), "q");
+  const admin = /* @__PURE__ */ __name(() => moderator(request, env, uid), "admin");
+  const trackedRows = /* @__PURE__ */ __name(async () => (await q("SELECT * FROM bet_matches WHERE active=1 ORDER BY rowid DESC LIMIT 120").all()).results.map((m) => ({ ...m, info: JSON.parse(m.info) })), "trackedRows");
+  if (!trial && now < START) return { disabled: true, message: "APUESTAS DISPONIBLES DESDE LA PR\xD3XIMA TEMPORADA.", start: START, period: null, matches: [], myBets: [] };
+  if (trial) await q("INSERT OR IGNORE INTO wallets(uid,name,created_at) VALUES(?,?,?)", uid, "PRUEBA DE APUESTAS", now).run();
+  else await q("INSERT OR IGNORE INTO wallets(uid,name,created_at) VALUES(?,?,?)", uid, (user.name || "Jugador").slice(0, 40), now).run();
+  const getSlot = /* @__PURE__ */ __name(async () => {
+    const s = await q("SELECT * FROM bet_matches WHERE id=?", body.slot).first();
+    if (!s) throw new GameError("Partido de apuestas inexistente.", 404);
+    return s;
+  }, "getSlot");
+  if (path === "/bets/reset" && trial) {
+    await db.batch(["DELETE FROM bets", "DELETE FROM bet_audit", "DELETE FROM bet_matches", "DELETE FROM bet_periods", "DELETE FROM ledger", "DELETE FROM wallets"].map((sql) => q(sql)));
+    return { ok: true };
+  }
+  if (path === "/bets/board") {
+    const data = await league(request, env), s = data.seasons?.filter((s2) => !s2.closed).at(-1) || (trial ? data.seasons?.at(-1) : null);
+    if (!s) return { disabled: true, message: "ESPERANDO LA NUEVA TEMPORADA.", matches: [], myBets: [], tracked: await trackedRows() };
+    const t = periodTime(now), id = s.id + ":" + t.week;
+    let p = await q("SELECT * FROM bet_periods WHERE id=?", id).first();
+    if (!p) {
+      const used = (await q("SELECT match_id FROM bet_matches WHERE status<>'void'").all()).results.map((m) => m.match_id), six = selectSix(s, used);
+      if (six.length < 6) return { disabled: true, message: "SE NECESITAN SEIS PARTIDOS PENDIENTES PARA PREPARAR EL PER\xCDODO.", matches: [], myBets: [], tracked: await trackedRows() };
+      await db.batch([q("INSERT OR IGNORE INTO bet_periods(id,season,week,closes,status,created_at) VALUES(?,?,?,?,?,?)", id, s.id, t.week, trial ? now + 7 * 864e5 : t.closes, "draft", now), ...six.map((m, i) => q("INSERT OR IGNORE INTO bet_matches(id,period,match_id,info,updated_at) VALUES(?,?,?,?,?)", id + ":" + i, id, m.id, info(m), now))]);
+      p = await q("SELECT * FROM bet_periods WHERE id=?", id).first();
+    }
+    if (p.status === "open" && now >= p.closes) {
+      await q("UPDATE bet_periods SET status='closed' WHERE id=? AND status='open'", id).run();
+      p.status = "closed";
+    }
+    const matches = (await q("SELECT * FROM bet_matches WHERE period=? AND active=1 ORDER BY rowid", id).all()).results.map((m) => ({ ...m, info: JSON.parse(m.info) }));
+    const myBets = (await q("SELECT * FROM bets WHERE uid=? AND period=? ORDER BY created_at", uid, id).all()).results;
+    const tracked = await trackedRows();
+    return { period: p, matches, tracked, myBets, wallet: await q("SELECT balance FROM wallets WHERE uid=?", uid).first(), spent: myBets.filter((b) => b.status !== "void").reduce((n, b) => n + b.stake, 0), trial, canConfirm: trial ? true : await admin(), canManage: uid === env.OWNER_UID, serverNow: now };
+  }
+  if (path === "/bets/open") {
+    if (uid !== env.OWNER_UID) throw new GameError("Solo el creador puede habilitar apuestas.", 403);
+    const p = await q("SELECT * FROM bet_periods WHERE id=?", body.period).first();
+    if (!p || now >= p.closes) throw new GameError("El plazo de apuestas termin\xF3.", 409);
+    const slots = (await q("SELECT * FROM bet_matches WHERE period=? AND active=1", p.id).all()).results;
+    if (slots.length !== 6 || slots.some((s) => s.status !== "pending")) throw new GameError("Revis\xE1 los seis partidos antes de habilitar.", 409);
+    const data = await league(request, env), season = data.seasons.find((s) => s.id === p.season);
+    if (!season || !trial && season.closed) throw new GameError("La temporada est\xE1 cerrada.", 409);
+    const fs = fixtures(season);
+    if (slots.some((s) => !fs.some((m) => m.id === s.match_id && sameFixture(m, s) && m.a === null && m.b === null))) throw new GameError("Hay partidos ya jugados. Correg\xED la selecci\xF3n.", 409);
+    await q("UPDATE bet_periods SET status='open' WHERE id=? AND status='draft'", p.id).run();
+    return { ok: true };
+  }
+  if (path === "/bets/place") {
+    if (!["home", "draw", "away"].includes(body.choice) || !Number.isInteger(body.stake) || body.stake < 1 || body.stake > 150 || typeof body.id !== "string" || !/^[-a-zA-Z0-9]{16,64}$/.test(body.id)) throw new GameError("Eleg\xED resultado y una cantidad entera de 1 a 150 fichas.");
+    const slot = await getSlot();
+    const old = await q("SELECT * FROM bets WHERE uid=? AND slot=?", uid, slot.id).first();
+    if (old) {
+      if (old.choice === body.choice && old.stake === body.stake) return { bet: old };
+      throw new GameError("Ya hay una apuesta registrada para este partido.", 409);
+    }
+    const p = await q("SELECT * FROM bet_periods WHERE id=?", slot.period).first();
+    if (p.status !== "open" || now >= p.closes || slot.status !== "pending" || slot.active !== 1) throw new GameError("Las apuestas est\xE1n cerradas.", 409);
+    const data = await league(request, env), s = data.seasons.find((s2) => s2.id === p.season), m = s && fixtures(s).find((m2) => m2.id === slot.match_id);
+    if (!s || !trial && s.closed || !m || !sameFixture(m, slot) || m.a !== null || m.b !== null) throw new GameError("Este partido ya tiene resultado. Esper\xE1 una correcci\xF3n del administrador.", 409);
+    try {
+      await q("INSERT INTO bets(id,uid,period,slot,choice,stake,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", body.id, uid, slot.period, slot.id, body.choice, body.stake, now, now).run();
+    } catch (e) {
+      const retry = await q("SELECT * FROM bets WHERE id=? AND uid=?", body.id, uid).first();
+      if (retry && retry.slot === body.slot && retry.choice === body.choice && retry.stake === body.stake) return { bet: retry };
+      throw new GameError("No se registr\xF3 la apuesta. Verific\xE1 tu saldo, el m\xE1ximo de 150 fichas y si el partido sigue disponible.", 409);
+    }
+    return { ok: true };
+  }
+  if (path === "/bets/replace") {
+    if (uid !== env.OWNER_UID) throw new GameError("Solo el creador puede corregir la selecci\xF3n.", 403);
+    const slot = await getSlot();
+    if (slot.status !== "pending" || slot.active !== 1) throw new GameError("Este partido ya fue liquidado o anulado.", 409);
+    const reason = String(body.reason || "").trim().slice(0, 200);
+    if (!reason) throw new GameError("Indic\xE1 el motivo de la correcci\xF3n.");
+    const p = await q("SELECT * FROM bet_periods WHERE id=?", slot.period).first();
+    const data = await league(request, env), s = data.seasons.find((s2) => s2.id === p.season), m = s && fixtures(s).find((m2) => m2.id === body.match);
+    if (!m || m.a !== null || m.b !== null) throw new GameError("Eleg\xED un partido pendiente de esa temporada.");
+    if (await q("SELECT id FROM bet_matches WHERE match_id=? AND status<>'void' AND id<>?", m.id, slot.id).first()) throw new GameError("Ese partido ya est\xE1 seleccionado.", 409);
+    const id = crypto.randomUUID();
+    await db.batch([q("UPDATE bet_matches SET status='void',active=0,reason=?,version=version+1,updated_at=? WHERE id=? AND status='pending' AND version=?", reason, now, slot.id, slot.version), q("INSERT INTO bet_matches(id,period,match_id,info,updated_at,replaced_from) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM bet_matches WHERE id=? AND status='void' AND version=?)", id, p.id, m.id, info(m), now, slot.id, slot.id, slot.version + 1), q("INSERT OR IGNORE INTO bet_audit(id,actor,slot,action,reason,at) SELECT ?,?,?,'replace',?,? WHERE EXISTS(SELECT 1 FROM bet_matches WHERE id=?)", id, uid, slot.id, reason, now, id)]);
+    return { ok: true };
+  }
+  if (path === "/bets/settle") {
+    if (!await admin()) throw new GameError("Solo administradores pueden confirmar para apuestas.", 403);
+    if (body.confirm !== true) throw new GameError("Falta la confirmaci\xF3n de apuestas.");
+    const slot = await getSlot();
+    if (slot.status === "settled") {
+      if (slot.a !== body.a || slot.b !== body.b) throw new GameError("Las apuestas ya fueron liquidadas con otro marcador.", 409);
+      return { ok: true, alreadySettled: true };
+    }
+    if (slot.status !== "pending" || slot.active !== 1) throw new GameError("El partido fue anulado.", 409);
+    let m;
+    if (trial) {
+      if (!Number.isInteger(body.a) || !Number.isInteger(body.b) || body.a < 0 || body.b < 0 || body.a > 99 || body.b > 99) throw new GameError("Marcador de prueba inv\xE1lido.");
+      m = { a: body.a, b: body.b };
+    } else {
+      const p = await q("SELECT * FROM bet_periods WHERE id=?", slot.period).first(), data = await league(request, env), s = data.seasons.find((s2) => s2.id === p.season);
+      m = s && fixtures(s).find((m2) => m2.id === slot.match_id);
+      if (!m || !sameFixture(m, slot) || !Number.isInteger(m.a) || !Number.isInteger(m.b) || m.a < 0 || m.b < 0 || m.a > 99 || m.b > 99) throw new GameError("Primero guard\xE1 el resultado y esper\xE1 a que se sincronice.", 409);
+      if (m.a !== body.a || m.b !== body.b) throw new GameError("El resultado cambi\xF3. Revisalo antes de confirmar.", 409);
+    }
+    const result = await q("UPDATE bet_matches SET a=?,b=?,status='settled',version=version+1,updated_at=? WHERE id=? AND status='pending' AND version=? RETURNING id", m.a, m.b, now, slot.id, slot.version).first();
+    if (!result) throw new GameError("La confirmaci\xF3n ya cambi\xF3. Actualiz\xE1.", 409);
+    await q("INSERT OR IGNORE INTO bet_audit VALUES(?,?,?,'settle',?,?)", slot.id + ":settle", uid, slot.id, "Resultado confirmado: " + m.a + "\u2013" + m.b, now).run();
+    return { ok: true };
+  }
+  throw new GameError("Ruta inexistente.", 404);
+}
+__name(bets, "bets");
+
 // practice.mjs
 var PRACTICE_OWNER = "iCLoGhjbXNgY3Q7dbxX0456vagI2";
 async function practice(path, body, user, q, now) {
@@ -139,7 +327,7 @@ async function practice(path, body, user, q, now) {
 }
 __name(practice, "practice");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/buffer_utils.js
+// node_modules/jose/dist/webapi/lib/buffer_utils.js
 var encoder = new TextEncoder();
 var decoder = new TextDecoder();
 var MAX_INT32 = 2 ** 32;
@@ -167,7 +355,7 @@ function encode(string) {
 }
 __name(encode, "encode");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/base64.js
+// node_modules/jose/dist/webapi/lib/base64.js
 function decodeBase64(encoded) {
   if (Uint8Array.fromBase64) {
     return Uint8Array.fromBase64(encoded);
@@ -181,7 +369,7 @@ function decodeBase64(encoded) {
 }
 __name(decodeBase64, "decodeBase64");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/util/base64url.js
+// node_modules/jose/dist/webapi/util/base64url.js
 function decode(input) {
   if (Uint8Array.fromBase64) {
     return Uint8Array.fromBase64(typeof input === "string" ? input : decoder.decode(input), {
@@ -201,7 +389,7 @@ function decode(input) {
 }
 __name(decode, "decode");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/util/errors.js
+// node_modules/jose/dist/webapi/util/errors.js
 var JOSEError = class extends Error {
   static {
     __name(this, "JOSEError");
@@ -323,7 +511,7 @@ var JWSSignatureVerificationFailed = class extends JOSEError {
   }
 };
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/crypto_key.js
+// node_modules/jose/dist/webapi/lib/crypto_key.js
 var unusable = /* @__PURE__ */ __name((name, prop = "algorithm.name") => new TypeError(`CryptoKey does not support this operation, its ${prop} must be ${name}`), "unusable");
 var isAlgorithm = /* @__PURE__ */ __name((algorithm, name) => algorithm.name === name, "isAlgorithm");
 function getHashLength(hash) {
@@ -415,7 +603,7 @@ function checkSigCryptoKey(key, alg, usage) {
 }
 __name(checkSigCryptoKey, "checkSigCryptoKey");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/invalid_key_input.js
+// node_modules/jose/dist/webapi/lib/invalid_key_input.js
 function message(msg, actual, ...types) {
   types = types.filter(Boolean);
   if (types.length > 2) {
@@ -441,7 +629,7 @@ __name(message, "message");
 var invalidKeyInput = /* @__PURE__ */ __name((actual, ...types) => message("Key must be ", actual, ...types), "invalidKeyInput");
 var withAlg = /* @__PURE__ */ __name((alg, actual, ...types) => message(`Key for the ${alg} algorithm must be `, actual, ...types), "withAlg");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_key_like.js
+// node_modules/jose/dist/webapi/lib/is_key_like.js
 var isCryptoKey = /* @__PURE__ */ __name((key) => {
   if (key?.[Symbol.toStringTag] === "CryptoKey")
     return true;
@@ -454,7 +642,7 @@ var isCryptoKey = /* @__PURE__ */ __name((key) => {
 var isKeyObject = /* @__PURE__ */ __name((key) => key?.[Symbol.toStringTag] === "KeyObject", "isKeyObject");
 var isKeyLike = /* @__PURE__ */ __name((key) => isCryptoKey(key) || isKeyObject(key), "isKeyLike");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_disjoint.js
+// node_modules/jose/dist/webapi/lib/is_disjoint.js
 function isDisjoint(...headers) {
   const sources = headers.filter(Boolean);
   if (sources.length === 0 || sources.length === 1) {
@@ -478,7 +666,7 @@ function isDisjoint(...headers) {
 }
 __name(isDisjoint, "isDisjoint");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_object.js
+// node_modules/jose/dist/webapi/lib/is_object.js
 var isObjectLike = /* @__PURE__ */ __name((value) => typeof value === "object" && value !== null, "isObjectLike");
 function isObject(input) {
   if (!isObjectLike(input) || Object.prototype.toString.call(input) !== "[object Object]") {
@@ -495,7 +683,7 @@ function isObject(input) {
 }
 __name(isObject, "isObject");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/check_key_length.js
+// node_modules/jose/dist/webapi/lib/check_key_length.js
 function checkKeyLength(alg, key) {
   if (alg.startsWith("RS") || alg.startsWith("PS")) {
     const { modulusLength } = key.algorithm;
@@ -506,7 +694,7 @@ function checkKeyLength(alg, key) {
 }
 __name(checkKeyLength, "checkKeyLength");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/jwk_to_key.js
+// node_modules/jose/dist/webapi/lib/jwk_to_key.js
 function subtleMapping(jwk) {
   let algorithm;
   let keyUsages;
@@ -618,7 +806,7 @@ async function jwkToKey(jwk) {
 }
 __name(jwkToKey, "jwkToKey");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/key/import.js
+// node_modules/jose/dist/webapi/key/import.js
 async function importJWK(jwk, alg, options) {
   if (!isObject(jwk)) {
     throw new TypeError("JWK must be an object");
@@ -655,7 +843,7 @@ async function importJWK(jwk, alg, options) {
 }
 __name(importJWK, "importJWK");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/validate_crit.js
+// node_modules/jose/dist/webapi/lib/validate_crit.js
 function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader, joseHeader) {
   if (joseHeader.crit !== void 0 && protectedHeader?.crit === void 0) {
     throw new Err('"crit" (Critical) Header Parameter MUST be integrity protected');
@@ -687,7 +875,7 @@ function validateCrit(Err, recognizedDefault, recognizedOption, protectedHeader,
 }
 __name(validateCrit, "validateCrit");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/validate_algorithms.js
+// node_modules/jose/dist/webapi/lib/validate_algorithms.js
 function validateAlgorithms(option, algorithms) {
   if (algorithms !== void 0 && (!Array.isArray(algorithms) || algorithms.some((s) => typeof s !== "string"))) {
     throw new TypeError(`"${option}" option must be an array of strings`);
@@ -699,13 +887,13 @@ function validateAlgorithms(option, algorithms) {
 }
 __name(validateAlgorithms, "validateAlgorithms");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/is_jwk.js
+// node_modules/jose/dist/webapi/lib/is_jwk.js
 var isJWK = /* @__PURE__ */ __name((key) => isObject(key) && typeof key.kty === "string", "isJWK");
 var isPrivateJWK = /* @__PURE__ */ __name((key) => key.kty !== "oct" && (key.kty === "AKP" && typeof key.priv === "string" || typeof key.d === "string"), "isPrivateJWK");
 var isPublicJWK = /* @__PURE__ */ __name((key) => key.kty !== "oct" && key.d === void 0 && key.priv === void 0, "isPublicJWK");
 var isSecretJWK = /* @__PURE__ */ __name((key) => key.kty === "oct" && typeof key.k === "string", "isSecretJWK");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/normalize_key.js
+// node_modules/jose/dist/webapi/lib/normalize_key.js
 var cache;
 var handleJWK = /* @__PURE__ */ __name(async (key, jwk, alg, freeze = false) => {
   cache ||= /* @__PURE__ */ new WeakMap();
@@ -877,7 +1065,7 @@ async function normalizeKey(key, alg) {
 }
 __name(normalizeKey, "normalizeKey");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/check_key_type.js
+// node_modules/jose/dist/webapi/lib/check_key_type.js
 var tag = /* @__PURE__ */ __name((key) => key?.[Symbol.toStringTag], "tag");
 var jwkMatchesOp = /* @__PURE__ */ __name((alg, key, usage) => {
   if (key.use !== void 0) {
@@ -998,7 +1186,7 @@ function checkKeyType(alg, key, usage) {
 }
 __name(checkKeyType, "checkKeyType");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/subtle_dsa.js
+// node_modules/jose/dist/webapi/lib/subtle_dsa.js
 function subtleAlgorithm(alg, algorithm) {
   const hash = `SHA-${alg.slice(-3)}`;
   switch (alg) {
@@ -1031,7 +1219,7 @@ function subtleAlgorithm(alg, algorithm) {
 }
 __name(subtleAlgorithm, "subtleAlgorithm");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/get_sign_verify_key.js
+// node_modules/jose/dist/webapi/lib/get_sign_verify_key.js
 async function getSigKey(alg, key, usage) {
   if (key instanceof Uint8Array) {
     if (!alg.startsWith("HS")) {
@@ -1044,7 +1232,7 @@ async function getSigKey(alg, key, usage) {
 }
 __name(getSigKey, "getSigKey");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/verify.js
+// node_modules/jose/dist/webapi/lib/verify.js
 async function verify(alg, key, signature, data) {
   const cryptoKey = await getSigKey(alg, key, "verify");
   checkKeyLength(alg, cryptoKey);
@@ -1057,7 +1245,7 @@ async function verify(alg, key, signature, data) {
 }
 __name(verify, "verify");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/jws/flattened/verify.js
+// node_modules/jose/dist/webapi/jws/flattened/verify.js
 async function flattenedVerify(jws, key, options) {
   if (!isObject(jws)) {
     throw new JWSInvalid("Flattened JWS must be an object");
@@ -1160,7 +1348,7 @@ async function flattenedVerify(jws, key, options) {
 }
 __name(flattenedVerify, "flattenedVerify");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/jws/compact/verify.js
+// node_modules/jose/dist/webapi/jws/compact/verify.js
 async function compactVerify(jws, key, options) {
   if (jws instanceof Uint8Array) {
     jws = decoder.decode(jws);
@@ -1181,7 +1369,7 @@ async function compactVerify(jws, key, options) {
 }
 __name(compactVerify, "compactVerify");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/lib/jwt_claims_set.js
+// node_modules/jose/dist/webapi/lib/jwt_claims_set.js
 var epoch = /* @__PURE__ */ __name((date) => Math.floor(date.getTime() / 1e3), "epoch");
 var minute = 60;
 var hour = minute * 60;
@@ -1340,7 +1528,7 @@ function validateClaimsSet(protectedHeader, encodedPayload, options = {}) {
 }
 __name(validateClaimsSet, "validateClaimsSet");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/jwt/verify.js
+// node_modules/jose/dist/webapi/jwt/verify.js
 async function jwtVerify(jwt, key, options) {
   const verified = await compactVerify(jwt, key, options);
   if (verified.protectedHeader.crit?.includes("b64") && verified.protectedHeader.b64 === false) {
@@ -1355,7 +1543,7 @@ async function jwtVerify(jwt, key, options) {
 }
 __name(jwtVerify, "jwtVerify");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/jwks/local.js
+// node_modules/jose/dist/webapi/jwks/local.js
 function getKtyFromAlg(alg) {
   switch (typeof alg === "string" && alg.slice(0, 2)) {
     case "RS":
@@ -1478,7 +1666,7 @@ function createLocalJWKSet(jwks) {
 }
 __name(createLocalJWKSet, "createLocalJWKSet");
 
-// ../../pml-games190/server/node_modules/jose/dist/webapi/jwks/remote.js
+// node_modules/jose/dist/webapi/jwks/remote.js
 function isCloudflareWorkers() {
   return typeof WebSocketPair !== "undefined" || typeof navigator !== "undefined" && true || typeof EdgeRuntime !== "undefined" && EdgeRuntime === "vercel";
 }
@@ -1677,7 +1865,7 @@ async function handle(request, env, identity = null, now = Date.now()) {
   const path = new URL(request.url).pathname;
   if (path === "/health" && request.method === "GET") {
     await env.DB.prepare("SELECT uid FROM wallets LIMIT 1").bind().first();
-    return response({ service: "pml-games", version: "1.9.2", rules: 1, practice: true });
+    return response({ service: "pml-games", version: "1.9.5", rules: 1, practice: true, bets: true });
   }
   if (!["GET", "POST"].includes(request.method)) throw new GameError("M\xE9todo no permitido.", 405);
   const user = identity || await authenticate(request, env), uid = user.sub;
@@ -1695,6 +1883,7 @@ async function handle(request, env, identity = null, now = Date.now()) {
     }
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new GameError("Solicitud inv\xE1lida.");
   }
+  if (path.startsWith("/bets/") || path.startsWith("/practice/bets/")) return response(await bets(path, body, user, { request, env, db, now }));
   if (path.startsWith("/practice/")) {
     if (request.method !== "POST") throw new GameError("M\xE9todo no permitido.", 405);
     return response(await practice(path, body, user, q, now));
