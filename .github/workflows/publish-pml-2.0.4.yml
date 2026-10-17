@@ -1,0 +1,40 @@
+name: Publicar APK verificado 2.0.4
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-pml-2.0.4.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-pml-2.0.4
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo}=context.repo;
+            const expected='7e33d04c3c369f547cba64f7032c9e39377ddb8b85631558078b62d218ec729c';
+            const chunks=[];
+            for(const part of [1,2]){
+             const response=await fetch('https://8aefe620.promobileleague.pages.dev/downloads/pml-v204-7e33d04c3c36-part'+part);
+             if(!response.ok)throw new Error('APK download failed: '+response.status);
+             chunks.push(Buffer.from(await response.arrayBuffer()));
+            }
+            const apk=Buffer.concat(chunks);
+            if(require('node:crypto').createHash('sha256').update(apk).digest('hex')!==expected)throw new Error('APK checksum mismatch');
+            let release;
+            try{release=(await github.rest.repos.getReleaseByTag({owner,repo,tag:'v2.0.4'})).data;}catch(e){if(e.status!==404)throw e;}
+            if(release&&!release.draft){core.notice('Already published; left unchanged.');return;}
+            const body='Canal: PML-TORNEOS\nPaquete: com.promobileleague.torneos\nVersión: 2.0.4\nCódigo: 43\nSHA-256 APK: '+expected+'\n\nFotos de jugadores y escudos completos en las noticias, con ajuste adaptable para móvil, tablet y computadora. Compartir mantiene el enlace oficial y el logo. Conserva las correcciones del medallero y funciones anteriores.\n\nInstalar sobre PML Torneos; conserva los datos y la firma. Android 7 o posterior con WebView actualizado.';
+            if(!release)release=(await github.rest.repos.createRelease({owner,repo,tag_name:'v2.0.4',target_commitish:context.sha,name:'PML Torneos 2.0.4',body,draft:true,prerelease:false})).data;
+            const assets=(await github.rest.repos.listReleaseAssets({owner,repo,release_id:release.id})).data;
+            for(const asset of assets)if(asset.name==='Pro-Mobile-League.apk')await github.rest.repos.deleteReleaseAsset({owner,repo,asset_id:asset.id});
+            const uploaded=(await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name:'Pro-Mobile-League.apk',data:apk,headers:{'content-type':'application/vnd.android.package-archive','content-length':apk.length}})).data;
+            if(uploaded.size!==apk.length)throw new Error('Incomplete APK upload');
+            await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:false,make_latest:'true'});
+            core.notice('Published verified APK: '+release.html_url);
