@@ -1,0 +1,40 @@
+name: Publicar APK verificado 2.0.6
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-pml-2.0.6.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-pml-2.0.6
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo}=context.repo;
+            const expected='d052a8d9e2fe485e78ad7b611073e0dd7ed26c5ba75a154bbbb8c8c8dc923c56';
+            const chunks=[];
+            for(const part of [1,2]){
+             const response=await fetch('https://542e7027.promobileleague.pages.dev/downloads/pml-v206-d052a8d9e2fe-part'+part);
+             if(!response.ok)throw new Error('APK download failed: '+response.status);
+             chunks.push(Buffer.from(await response.arrayBuffer()));
+            }
+            const apk=Buffer.concat(chunks);
+            if(require('node:crypto').createHash('sha256').update(apk).digest('hex')!==expected)throw new Error('APK checksum mismatch');
+            let release;
+            try{release=(await github.rest.repos.getReleaseByTag({owner,repo,tag:'v2.0.6'})).data;}catch(e){if(e.status!==404)throw e;}
+            if(release&&!release.draft){core.notice('Already published; left unchanged.');return;}
+            const body="Canal: PML-TORNEOS\nPaquete: com.promobileleague.torneos\nVersión: 2.0.6\nCódigo: 45\nSHA-256 APK: d052a8d9e2fe485e78ad7b611073e0dd7ed26c5ba75a154bbbb8c8c8dc923c56\n\nEdición disponible durante la recepción de cambios con una base ya sincronizada. Lecturas paralelas limitadas y protección frente a respuestas obsoletas. Conserva la selección y los borradores, y corrige falsos conflictos de borradores con cambios del propio editor. Mantiene la revisión si dos editores modifican el mismo partido.\n\nDT: errores de acceso visibles y comprobación de vinculación con la cuenta y temporada actuales. Conserva los permisos limitados a foto y nacionalidad del DT, dorsales y posiciones. No se modificaron las reglas de Firebase.\n\nPruebas simuladas de concurrencia, transporte y permisos aprobadas; firma e integridad verificadas. Falta prueba física Android y con las cuentas reales implicadas.\n\nInstalar sobre PML Torneos sin desinstalar. Android 7 o posterior.";
+            if(!release)release=(await github.rest.repos.createRelease({owner,repo,tag_name:'v2.0.6',target_commitish:context.sha,name:'PML Torneos 2.0.6',body,draft:true,prerelease:false})).data;
+            const assets=(await github.rest.repos.listReleaseAssets({owner,repo,release_id:release.id})).data;
+            for(const asset of assets)if(asset.name==='Pro-Mobile-League.apk')await github.rest.repos.deleteReleaseAsset({owner,repo,asset_id:asset.id});
+            const uploaded=(await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name:'Pro-Mobile-League.apk',data:apk,headers:{'content-type':'application/vnd.android.package-archive','content-length':apk.length}})).data;
+            if(uploaded.size!==apk.length)throw new Error('Incomplete APK upload');
+            await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:false,make_latest:'true'});
+            core.notice('Published verified APK: '+release.html_url);
