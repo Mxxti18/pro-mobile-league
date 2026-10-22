@@ -1,0 +1,47 @@
+name: Publicar APK verificado 2.0.8
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-pml-2.0.8.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-pml-2.0.8
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo}=context.repo;
+            const digest=data=>require('node:crypto').createHash('sha256').update(data).digest('hex');
+            const base='https://b84aaadc.promobileleague.pages.dev/downloads/';
+            const download=async name=>{
+              const response=await fetch(base+name,{signal:AbortSignal.timeout(120000)});
+              if(!response.ok)throw new Error('Download failed: '+name+' '+response.status);
+              return Buffer.from(await response.arrayBuffer());
+            };
+            const chunks=[];
+            for(const part of [1,2])chunks.push(await download('pml-v208-da1959447dec-part'+part));
+            const apk=Buffer.concat(chunks);
+            if(apk.length!==38631918||digest(apk)!=='da1959447dec80202ee3c1a6912ceba2676fefcdae83310220f863d72640ac4d')throw new Error('APK checksum mismatch');
+            const config=await download('Configuracion-PML-2.0.8.zip');
+            if(digest(config)!=='75efc2f54af22d8a973440658a634e6cb1aa071d9c0fb0337e1ed5c014090c8c')throw new Error('Configuration checksum mismatch');
+            let release;
+            try{release=(await github.rest.repos.getReleaseByTag({owner,repo,tag:'v2.0.8'})).data;}catch(e){if(e.status!==404)throw e;}
+            if(release&&!release.draft){core.notice('Already published; left unchanged.');return;}
+            const body="Canal: PML-TORNEOS\nPaquete: com.promobileleague.torneos\nVersión: 2.0.8\nCódigo: 47\nSHA-256 APK: da1959447dec80202ee3c1a6912ceba2676fefcdae83310220f863d72640ac4d\n\nRecuperación de permisos de moderadores, reintentos de conexión y avisos de conflictos con copia local antes de recuperar la nube. Limpieza de borradores sin cambios que bloqueaban el cierre de temporada. Reservas de apuestas vencidas liberadas y paginación de mis noticias y pendientes de aprobación.\n\nLa app, la web y el servidor incluyen las correcciones. La protección adicional del guardado de moderadores requiere activar Firebase siguiendo el ZIP adjunto; todavía no está activa sin esa configuración. No se requiere migrar ni reiniciar los datos.\n\nPruebas locales de permisos, concurrencia, cobros/devoluciones, borradores y servidor aprobadas. Interfaz Android/web comprobada en navegador. Firma e integridad del APK verificadas. Falta comprobar la activación con credenciales reales y la instalación en un teléfono físico.\n\nInstalar sobre PML Torneos sin desinstalar. Android 7 o posterior.";
+            if(!release)release=(await github.rest.repos.createRelease({owner,repo,tag_name:'v2.0.8',target_commitish:context.sha,name:'PML Torneos 2.0.8',body,draft:true,prerelease:false})).data;
+            const assets=(await github.rest.repos.listReleaseAssets({owner,repo,release_id:release.id})).data;
+            for(const item of [{name:'Pro-Mobile-League.apk',data:apk,type:'application/vnd.android.package-archive'},{name:'Configuracion-PML-2.0.8.zip',data:config,type:'application/zip'}]){
+              for(const asset of assets)if(asset.name===item.name)await github.rest.repos.deleteReleaseAsset({owner,repo,asset_id:asset.id});
+              const uploaded=(await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name:item.name,data:item.data,headers:{'content-type':item.type,'content-length':item.data.length}})).data;
+              if(uploaded.size!==item.data.length)throw new Error('Incomplete upload: '+item.name);
+              if(uploaded.digest&&uploaded.digest!=='sha256:'+digest(item.data))throw new Error('Uploaded checksum mismatch: '+item.name);
+            }
+            await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:false,make_latest:'true'});
+            core.notice('Published verified APK: '+release.html_url);

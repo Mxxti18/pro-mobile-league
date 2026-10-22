@@ -1,0 +1,11 @@
+{
+  "file": "PML-Torneos-2.0.8.apk",
+  "sha256": "da1959447dec80202ee3c1a6912ceba2676fefcdae83310220f863d72640ac4d",
+  "size": 38631918,
+  "certificateSHA256": "0a5d0501de7179af19d93eb7a7642fa4356b5022e3a4125e262dc78eebe7ddf9",
+  "versionCode": 47,
+  "versionName": "2.0.8",
+  "package": "com.promobileleague.torneos",
+  "minSdkVersion": 24,
+  "targetSdkVersion": 35
+}

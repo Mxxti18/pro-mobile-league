@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "esbuild": "0.27.7",
+    "jose": "6.2.12"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node regression208.mjs && node gateway208.test.mjs",
+    "build": "esbuild worker-core.mjs --bundle --format=esm --platform=browser --target=es2022 --outfile=../dist/worker-2.0.8.mjs"
+  }
+}

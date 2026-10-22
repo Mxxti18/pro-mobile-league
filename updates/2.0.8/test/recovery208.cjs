@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const root=__dirname+'/../assets/',drafts=require(root+'drafts208.js'),cloud=fs.readFileSync(root+'cloud-v22.js','utf8'),ui=fs.readFileSync(root+'update-v208.js','utf8');
+const line=(s,p)=>s.split('\n').find(l=>l.startsWith(p));
+(async()=>{
+ const match={id:'m',h:'h',w:'w',a:2,b:1,scorers:[[{name:'A',goals:2}],[]],assists:[[],[]],reds:[[],[]]};
+ const draft={a:'2',b:'1',scorers:structuredClone(match.scorers),assists:[[],[]],rawGoals:null,rawAssists:null};
+ assert(drafts.unchanged(draft,match));assert(!drafts.unchanged({...draft,a:'3'},match));assert(!drafts.unchanged({...draft,scorers:[[],[]]},match));assert(!drafts.unchanged({...draft,unknown:true},match));assert(!drafts.unchanged({...draft,rawGoals:['typed text','']},match,()=>['A | 2','']));assert(!drafts.unchanged({...draft,a:'',b:''},{...match,a:null,b:null}));
+ const season={fixtures:[[match]],drafts:{m:structuredClone(draft)}};
+ const dc={Drafts208:drafts,allMatches:s=>s.fixtures.flat(),personListText:()=>['A | 2','']};vm.createContext(dc);vm.runInContext(line(ui,'function cleanDrafts208('),dc);assert(dc.cleanDrafts208(season));assert.deepEqual(season.drafts,{});
+ let ok,error,subscriptions=0;const timers=new Map();let serial=0;
+ const c={C22:{user:{uid:'mod'},nonce:1,role:'moderator',roleChecked:true},CLOUD_OWNER22:'owner',clearTimeout:id=>timers.delete(id),setTimeout:(f,ms)=>{timers.set(++serial,{f,ms});return serial},document:{querySelectorAll:()=>[]},render:()=>{},status22:()=>{},cloudError22:e=>e.message,editable22:()=>false,db22:{collection:()=>({doc:()=>({onSnapshot:(opts,a,b)=>{subscriptions++;ok=a;error=b;return()=>{}}})})}};
+ vm.createContext(c);vm.runInContext(line(cloud,'function owner22(')+'\n'+line(cloud,'function scheduleCloud208(')+'\n'+line(cloud,'function subscribeRole208('),c);
+ c.subscribeRole208();error({message:'connection error'});assert(!c.C22.roleChecked);assert.equal(timers.size,1);const job=[...timers.values()][0];assert.equal(job.ms,2000);job.f();assert.equal(subscriptions,2);ok({metadata:{fromCache:false},data:()=>({role:'moderator'})});assert(c.C22.roleChecked);assert.equal(c.C22.roleError208,'');const staleError=error;c.C22.nonce++;staleError({message:'stale'});assert(c.C22.roleChecked);
+ let stored='',permit=false,downloaded=0;const alerts=[];const state={seasons:[{drafts:{m:draft}}]},rc={state,C22:{user:{uid:'mod'},nonce:1,conflict:true},Date,JSON,confirm:()=>true,alert:s=>alerts.push(s),cloudError22:e=>e.message,AndroidStore:{saveCloudState:(key,s)=>{if(permit)stored=s;return permit},readCloudState:()=>stored},repo22:{head:{get:async()=>({exists:true,data:()=>({revision:'cloud'})})}},acceptHead22:async(h,force)=>{assert(force);downloaded++;rc.state={seasons:[]};rc.C22.conflict=false},subscribeRole208:()=>{},subscribeHead208:()=>{},document:{getElementById:()=>({close:()=>{}})},render:()=>{},paintSync208:()=>{}};
+ vm.createContext(rc);vm.runInContext('let syncBusy208=false,recoveryDate208=0;'+line(ui,'async function useCloud208('),rc);await rc.useCloud208();assert.equal(downloaded,0);assert.equal(rc.state,state);assert(alerts[0].includes('no se descartaron'));permit=true;await rc.useCloud208();assert.equal(downloaded,1);assert.deepEqual(JSON.parse(stored).data,state);assert.equal(rc.C22.conflict,false);
+ console.log('PASS no-op drafts, meaningful draft retention, terminal role retry, stale-account callback, backup-before-recovery and failed-storage safety.');
+})().catch(e=>{console.error(e);process.exit(1)});

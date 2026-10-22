@@ -1,0 +1,157 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+// PML 2.0.7 — BLOQUE ADITIVO. No reemplaza las reglas existentes.
+// Insertar DENTRO de match /databases/{database}/documents { ... }
+// Publicar junto con las reglas actuales. Mantiene las demás funciones de la app.
+function teamEditor207() {
+ return request.auth != null &&
+  (request.auth.uid == 'iCLoGhjbXNgY3Q7dbxX0456vagI2' ||
+   (exists(/databases/$(database)/documents/roles/$(request.auth.uid)) &&
+    get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'moderator'));
+}
+function teamImage207() {
+ let d = request.resource.data;
+ return d.keys().hasAll(['data','createdAt']) && d.keys().hasOnly(['data','createdAt']) &&
+  d.data is string && d.data.size() <= 400000 &&
+  d.data.matches('data:image/(png|jpeg|webp);base64,.*') && d.createdAt == request.time;
+}
+match /leagues/main/assets/{image} {
+ allow create: if teamEditor207() && image.matches('[a-f0-9]{64}') && teamImage207();
+ allow update: if teamEditor207() && image.matches('[a-f0-9]{64}') && teamImage207() && request.resource.data.data == resource.data.data;
+}
+// Lectura del selector de usuarios para vincular DT; no concede gestión de cuentas o roles.
+match /profiles/{uid} { allow get, list: if teamEditor207(); }
+match /leagues/main/teamAssignments/{key} {
+ allow create, update: if teamEditor207()
+  && request.resource.data.keys().hasAll(['season','team','uid','name','playerIds','updatedAt'])
+  && request.resource.data.keys().hasOnly(['season','team','uid','name','playerIds','updatedAt'])
+  && request.resource.data.season is string && request.resource.data.season.size() <= 100
+  && request.resource.data.team is string && request.resource.data.team.size() <= 100
+  && key == request.resource.data.season + '_' + request.resource.data.team
+  && request.resource.data.uid is string && request.resource.data.uid.size() > 0 && request.resource.data.uid.size() <= 128
+  && request.resource.data.name is string && request.resource.data.name.size() <= 80
+  && request.resource.data.playerIds is list && request.resource.data.playerIds.size() <= 100
+  && request.resource.data.updatedAt == request.time;
+ allow delete: if teamEditor207();
+}
+match /leagues/main/teamCoachProfiles/{key} {
+ allow create, update: if teamEditor207()
+  && exists(/databases/$(database)/documents/leagues/main/teamAssignments/$(key))
+  && request.resource.data.keys().hasAll(['nationality','photo','updatedAt'])
+  && request.resource.data.keys().hasOnly(['nationality','photo','updatedAt'])
+  && request.resource.data.nationality is string && request.resource.data.nationality.size() <= 80
+  && request.resource.data.photo is string && request.resource.data.photo.size() <= 400000
+  && (request.resource.data.photo == '' || request.resource.data.photo.matches('data:image/(png|jpeg|webp);base64,.*'))
+  && request.resource.data.updatedAt == request.time;
+ allow delete: if teamEditor207();
+}
+match /leagues/main/teamPlayerFields/{id} {
+ allow create, update: if teamEditor207()
+  && request.resource.data.keys().hasAll(['assignment','player','number','position','updatedAt'])
+  && request.resource.data.keys().hasOnly(['assignment','player','number','position','updatedAt'])
+  && request.resource.data.assignment is string && request.resource.data.assignment.size() <= 201
+  && request.resource.data.player is string && request.resource.data.player.size() <= 100
+  && id == request.resource.data.assignment + '_' + request.resource.data.player
+  && exists(/databases/$(database)/documents/leagues/main/teamAssignments/$(request.resource.data.assignment))
+  && request.resource.data.player in get(/databases/$(database)/documents/leagues/main/teamAssignments/$(request.resource.data.assignment)).data.playerIds
+  && (request.resource.data.number == null || (request.resource.data.number is int && request.resource.data.number >= 0 && request.resource.data.number <= 99))
+  && request.resource.data.position is string && request.resource.data.position.size() <= 24
+  && request.resource.data.updatedAt == request.time;
+ allow delete: if teamEditor207();
+}
+
+
+  function signedIn(){ return request.auth != null; }
+  function owner(){ return signedIn() && request.auth.uid == 'iCLoGhjbXNgY3Q7dbxX0456vagI2'; }
+  function ownAccount(uid){ return signedIn() && request.auth.uid == uid; }
+  function editor(){ return owner() || (signedIn() && get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'moderator'); }
+  function validProfile(){
+   let d = request.resource.data;
+   let photo = d.get('photo','');
+   return d.keys().hasAll(['name','email','createdAt','updatedAt'])
+    && d.keys().hasOnly(['name','email','createdAt','updatedAt','photo'])
+    && d.name is string && d.name.size() <= 40
+    && d.email == request.auth.token.email && d.createdAt is timestamp
+    && d.updatedAt == request.time && photo is string && photo.size() <= 400000
+    && (photo == '' || photo.matches('data:image/(png|jpeg|webp);base64,.*'));
+  }
+  match /profiles/{uid} {
+   allow get: if owner() || ownAccount(uid);
+   allow list: if owner();
+   allow create: if ownAccount(uid) && validProfile() && request.resource.data.createdAt == request.time;
+   allow update: if ownAccount(uid) && validProfile() && request.resource.data.createdAt == resource.data.createdAt;
+   allow delete: if ownAccount(uid) && !owner();
+  }
+  match /roles/{uid} {
+   allow get: if owner() || ownAccount(uid);
+   allow list, write: if owner();
+  }
+  match /leagues/main/settings/closing {
+   allow read: if true;
+   allow create, update: if owner()
+    && request.resource.data.keys().hasAll(['enabled','endsAt','label','updatedAt'])
+    && request.resource.data.keys().hasOnly(['enabled','endsAt','label','updatedAt'])
+    && request.resource.data.enabled is bool
+    && request.resource.data.endsAt is number
+    && request.resource.data.endsAt > 0 && request.resource.data.endsAt < 4102444800000
+    && request.resource.data.label is string && request.resource.data.label.size() <= 80
+    && request.resource.data.updatedAt == request.time;
+   allow delete: if owner();
+  }
+  match /leagues/main/data/{document=**} {
+   allow read: if true;
+   allow write: if owner();
+  }
+  match /leagues/main/assets/{document=**} {
+   allow read: if true;
+   allow write: if owner();
+  }
+
+  // DT permissions are independent of moderator permissions.
+  function coachAllowed(key){
+   return signedIn()
+    && exists(/databases/$(database)/documents/leagues/main/teamAssignments/$(key))
+    && (owner() || get(/databases/$(database)/documents/leagues/main/teamAssignments/$(key)).data.uid == request.auth.uid);
+  }
+  match /leagues/main/teamAssignments/{key} {
+   allow read: if true;
+   allow create, update: if owner()
+    && request.resource.data.keys().hasAll(['season','team','uid','name','playerIds','updatedAt'])
+    && request.resource.data.keys().hasOnly(['season','team','uid','name','playerIds','updatedAt'])
+    && request.resource.data.season is string && request.resource.data.season.size() <= 100
+    && request.resource.data.team is string && request.resource.data.team.size() <= 100
+    && key == request.resource.data.season + '_' + request.resource.data.team
+    && request.resource.data.uid is string && request.resource.data.uid.size() > 0 && request.resource.data.uid.size() <= 128
+    && request.resource.data.name is string && request.resource.data.name.size() <= 80
+    && request.resource.data.playerIds is list && request.resource.data.playerIds.size() <= 100
+    && request.resource.data.updatedAt == request.time;
+   allow delete: if owner();
+  }
+  match /leagues/main/teamCoachProfiles/{key} {
+   allow read: if true;
+   allow create, update: if coachAllowed(key)
+    && request.resource.data.keys().hasAll(['nationality','photo','updatedAt'])
+    && request.resource.data.keys().hasOnly(['nationality','photo','updatedAt'])
+    && request.resource.data.nationality is string && request.resource.data.nationality.size() <= 80
+    && request.resource.data.photo is string && request.resource.data.photo.size() <= 400000
+    && (request.resource.data.photo == '' || request.resource.data.photo.matches('data:image/(png|jpeg|webp);base64,.*'))
+    && request.resource.data.updatedAt == request.time;
+   allow delete: if owner();
+  }
+  match /leagues/main/teamPlayerFields/{id} {
+   allow read: if true;
+   allow create, update: if request.resource.data.keys().hasAll(['assignment','player','number','position','updatedAt'])
+    && request.resource.data.keys().hasOnly(['assignment','player','number','position','updatedAt'])
+    && request.resource.data.assignment is string && request.resource.data.assignment.size() <= 201
+    && request.resource.data.player is string && request.resource.data.player.size() <= 100
+    && id == request.resource.data.assignment + '_' + request.resource.data.player
+    && coachAllowed(request.resource.data.assignment)
+    && request.resource.data.player in get(/databases/$(database)/documents/leagues/main/teamAssignments/$(request.resource.data.assignment)).data.playerIds
+    && (request.resource.data.number == null || (request.resource.data.number is int && request.resource.data.number >= 0 && request.resource.data.number <= 99))
+    && request.resource.data.position is string && request.resource.data.position.size() <= 24
+    && request.resource.data.updatedAt == request.time;
+   allow delete: if owner();
+  }
+ }
+}

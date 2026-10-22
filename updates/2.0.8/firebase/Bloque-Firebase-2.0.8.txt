@@ -1,0 +1,8 @@
+// REEMPLAZAR el bloque existente. No agregar como regla adicional.
+// Aplicar DESPUÉS de activar FIREBASE_SERVICE_ACCOUNT en pml-juegos,
+// comprobar el guardado de un moderador con la app/web 2.0.8
+// y conservar una copia de las reglas actuales.
+match /leagues/main/data/{document=**} {
+ allow read: if true;
+ allow write: if owner();
+}
