@@ -1,0 +1,45 @@
+name: Publicar APK verificado 2.0.9
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-pml-2.0.9.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-pml-2.0.9
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo}=context.repo;
+            const digest=data=>require('node:crypto').createHash('sha256').update(data).digest('hex');
+            const base='https://9b41af1e.promobileleague.pages.dev/downloads/';
+            const download=async name=>{
+              const response=await fetch(base+name,{signal:AbortSignal.timeout(120000)});
+              if(!response.ok)throw new Error('Download failed: '+name+' '+response.status);
+              return Buffer.from(await response.arrayBuffer());
+            };
+            const chunks=[];
+            for(const part of [1,2])chunks.push(await download('part'+part));
+            const apk=Buffer.concat(chunks);
+            if(apk.length!==38369688||digest(apk)!=='a03f41a0ce9455fb8715a1f4dff6e1321395010bf1df925f255ac99cb7f09148')throw new Error('APK checksum mismatch');
+            let release;
+            try{release=(await github.rest.repos.getReleaseByTag({owner,repo,tag:'v2.0.9'})).data;}catch(e){if(e.status!==404)throw e;}
+            if(release&&!release.draft){core.notice('Already published; left unchanged.');return;}
+            const body="Canal: PML-TORNEOS\nPaquete: com.promobileleague.torneos\nVersión: 2.0.9\nCódigo: 48\nSHA-256 APK: a03f41a0ce9455fb8715a1f4dff6e1321395010bf1df925f255ac99cb7f09148\n\nCorrige el cargador nativo: en Android los tres scripts de recuperación, guardado protegido y borradores estaban incluidos pero bloqueados por la lista de archivos permitidos. Vuelven a funcionar CONEXIÓN Y PERMISOS y las mejoras correspondientes de 2.0.8.\n\nNo requiere cambios en Firebase ni en el servidor. La web ya cargaba estos scripts. Instalar sobre la app actual, sin desinstalar.\n\nVerificados firma v2/v3, mismo certificado, rutas nativas compiladas y scripts empaquetados. Reproducción en navegador con las restricciones del cargador anterior y corregido. No se probó en un teléfono Android físico; el caso particular del moderador necesita comprobarse después de actualizar.";
+            if(!release)release=(await github.rest.repos.createRelease({owner,repo,tag_name:'v2.0.9',target_commitish:context.sha,name:'PML Torneos 2.0.9',body,draft:true,prerelease:false})).data;
+            const assets=(await github.rest.repos.listReleaseAssets({owner,repo,release_id:release.id})).data;
+            for(const item of [{name:'Pro-Mobile-League.apk',data:apk,type:'application/vnd.android.package-archive'}]){
+              for(const asset of assets)if(asset.name===item.name)await github.rest.repos.deleteReleaseAsset({owner,repo,asset_id:asset.id});
+              const uploaded=(await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name:item.name,data:item.data,headers:{'content-type':item.type,'content-length':item.data.length}})).data;
+              if(uploaded.size!==item.data.length)throw new Error('Incomplete upload: '+item.name);
+              if(uploaded.digest&&uploaded.digest!=='sha256:'+digest(item.data))throw new Error('Uploaded checksum mismatch: '+item.name);
+            }
+            await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:false,make_latest:'true'});
+            core.notice('Published verified APK: '+release.html_url);
