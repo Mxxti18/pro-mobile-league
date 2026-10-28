@@ -1,0 +1,47 @@
+name: Publicar APK verificado 2.1.1
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-pml-2.1.1.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-pml-2.1.1
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo}=context.repo;
+            const digest=data=>require('node:crypto').createHash('sha256').update(data).digest('hex');
+            const base='https://6b3c0571.promobileleague.pages.dev/downloads/';
+            const download=async name=>{
+              const response=await fetch(base+name,{signal:AbortSignal.timeout(120000)});
+              if(!response.ok)throw new Error('Download failed: '+name+' '+response.status);
+              return Buffer.from(await response.arrayBuffer());
+            };
+            const chunks=[];
+            for(const part of [1,2,3])chunks.push(await download('pml211-part'+part));
+            const apk=Buffer.concat(chunks);
+            if(apk.length!==43983584||digest(apk)!=='801da10c470887516c43d2db1f6d20241e81f119f31aec2fc18ff143ade5f173')throw new Error('APK checksum mismatch');
+            const instructions=await download('Instrucciones-PML-2.1.1.md');
+            if(digest(instructions)!=='8d64b46510f59150697d587cd1b31827be3a691275886c30b002ad7ca7aa94e5')throw new Error('Instructions checksum mismatch');
+            let release;
+            try{release=(await github.rest.repos.getReleaseByTag({owner,repo,tag:'v2.1.1'})).data;}catch(e){if(e.status!==404)throw e;}
+            if(release&&!release.draft){core.notice('Already published; left unchanged.');return;}
+            const body="Canal: PML-TORNEOS\nPaquete: com.promobileleague.torneos\nVersión: 2.1.1\nCódigo: 50\nSHA-256 APK: 801da10c470887516c43d2db1f6d20241e81f119f31aec2fc18ff143ade5f173\n\nRegistro de jugadores mediante Wikidata y Wikimedia Commons: nombre, foto con créditos de licencia, nacionalidad y posición revisables. Reutilización de fichas en diferentes equipos con estadísticas independientes y prevención de duplicados en el mismo equipo. Se oculta el dorsal. Mantiene registro manual y carga de foto desde el dispositivo.\n\nInstalar sobre PML Torneos sin desinstalar. Misma firma que 2.1.0. Web y servidor actualizados, sin cambios manuales en Firebase ni migraciones de base de datos.\n\nPruebas automáticas en el contenido ensamblado de Android y web a 412/1100 px, servidor, permisos, importación, reutilización y duplicados. Consultas reales con fotos a Wikimedia. Firma v2/v3 verificada. No se realizó instalación en teléfono Android físico ni escritura con una cuenta real de moderador. Verificar un registro legítimo entre app y web antes de una carga grande.\n\nLa cobertura y las fotografías dependen de Wikimedia; los datos sugeridos se revisan antes de guardar. Los créditos y licencias de cada imagen se conservan.";
+            if(!release)release=(await github.rest.repos.createRelease({owner,repo,tag_name:'v2.1.1',target_commitish:context.sha,name:'PML Torneos 2.1.1',body,draft:true,prerelease:false})).data;
+            const assets=(await github.rest.repos.listReleaseAssets({owner,repo,release_id:release.id})).data;
+            for(const item of [{name:'Pro-Mobile-League.apk',data:apk,type:'application/vnd.android.package-archive'},{name:'Instrucciones-PML-2.1.1.md',data:instructions,type:'text/markdown'}]){
+              for(const asset of assets)if(asset.name===item.name)await github.rest.repos.deleteReleaseAsset({owner,repo,asset_id:asset.id});
+              const uploaded=(await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name:item.name,data:item.data,headers:{'content-type':item.type,'content-length':item.data.length}})).data;
+              if(uploaded.size!==item.data.length)throw new Error('Incomplete upload: '+item.name);
+              if(uploaded.digest&&uploaded.digest!=='sha256:'+digest(item.data))throw new Error('Uploaded checksum mismatch: '+item.name);
+            }
+            await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:false,make_latest:'true'});
+            core.notice('Published verified APK: '+release.html_url);
